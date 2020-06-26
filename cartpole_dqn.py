@@ -118,8 +118,7 @@ class Agent:
         indices = np.arange(self.batch_size)
         q_eval = self.q_eval(states)[indices, actions]
         q_next = self.q_next(states_)
-        q_target = rewards + self.gamma * \
-            q_next.max(axis=1)[0] * (1 - terminals)
+        q_target = rewards + self.gamma * q_next.max(axis=1)[0] * (1 - terminals)
 
         loss = self.q_eval.learn(q_eval, q_target)
         self.epsilon *= 0.9 if self.epsilon > 0.1 else 1.0
