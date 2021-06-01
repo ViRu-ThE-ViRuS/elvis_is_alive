@@ -1,6 +1,7 @@
 import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
+from torchviz import make_dot
 
 import gym
 import numpy as np
@@ -32,7 +33,6 @@ class ReplayBuffer:
         self.states_[index] = state_
         self.rewards[index] = reward
         self.terminals[index] = terminal
-
         self.mem_counter += 1
 
 
@@ -52,7 +52,7 @@ class DeepQN(nn.Module):
         self.layers = nn.ModuleList(layers)
 
         self.loss = nn.MSELoss()
-        self.optimizer = T.optim.Adam(self.parameters())
+        self.optimizer = T.optim.Adam(self.parameters(), lr=0.005)
 
     def forward(self, states):
         for layer in self.layers[:-1]:
@@ -62,7 +62,7 @@ class DeepQN(nn.Module):
     def learn(self, predictions, targets):
         self.optimizer.zero_grad()
         loss = self.loss(input=predictions, target=targets)
-        loss.backward()
+        loss.backward(retain_graph=True)
         self.optimizer.step()
 
         return loss
@@ -75,8 +75,7 @@ class Agent:
         self.epsilon = epsilon
         self.gamma = gamma
 
-        self.q_eval = DeepQN(input_shape, output_shape, [64, 128])
-        self.q_next = DeepQN(input_shape, output_shape, [64, 128])
+        self.q_eval = DeepQN(input_shape, output_shape, [64, 64])
         self.memory = ReplayBuffer(10000, input_shape, output_shape)
 
         self.batch_size = 32
@@ -86,13 +85,10 @@ class Agent:
         if np.random.random() < self.epsilon:
             return np.random.choice(*self.output_shape)
         else:
+            self.q_eval.eval()
             state = T.tensor([state]).float()
             action = self.q_eval(state).max(axis=1)[1]
             return action.item()
-
-    def _update(self):
-        if self.learn_step % 2 == 0:
-            self.q_next.load_state_dict(self.q_eval.state_dict())
 
     def sample(self):
         actions, states, states_, rewards, terminals = \
@@ -107,29 +103,30 @@ class Agent:
         return actions, states, states_, rewards, terminals
 
     def learn(self, state, action, state_, reward, done):
+        self.memory.store(action, state, state_, reward, done)
+
         if self.memory.mem_counter < self.batch_size:
-            self.memory.store(action, state, state_, reward, done)
             return
 
-        self.memory.store(action, state, state_, reward, done)
+        self.q_eval.train()
         self.learn_step += 1
         actions, states, states_, rewards, terminals = self.sample()
-
         indices = np.arange(self.batch_size)
         q_eval = self.q_eval(states)[indices, actions]
-        q_next = self.q_next(states_)
+        q_next = self.q_eval(states_).detach()
         q_target = rewards + self.gamma * q_next.max(axis=1)[0] * (1 - terminals)
 
         loss = self.q_eval.learn(q_eval, q_target)
-        self.epsilon *= 0.9 if self.epsilon > 0.1 else 1.0
+        self.epsilon *= 0.95 if self.epsilon > 0.1 else 1.0
 
-        self._update()
+        # visualize
+        # make_dot(loss, params=dict(self.q_eval.named_parameters())).render("attached")
+
         return loss.item()
 
 
 def learn(env, agent, episodes=500):
-    print('Episode: 5 Episode Mean Reward: Last Loss: 5 Episode Mean Step'
-          ' : Last Reward')
+    print('Episode: Mean Reward: Mean Loss: Mean Step')
 
     rewards = []
     losses = [0]
@@ -156,18 +153,23 @@ def learn(env, agent, episodes=500):
         rewards.append(total_reward)
         steps.append(n_steps)
 
-        if episode % (episodes//10) == 0 and episode != 0:
-            print(f'{episode:5d} : {np.mean(rewards[-5:]):5.2f} '
-                  f': {losses[-1]: 5.2f}: {np.mean(steps[-5:]): 5.2f} '
-                  f': {rewards[-1]: 3f}')
+        if episode % (episodes // 10) == 0 and episode != 0:
+            print(f'{episode:5d} : {np.mean(rewards):5.2f} '
+                  f': {np.mean(losses):5.3f}: {np.mean(steps):5.2f}')
+            rewards = []
+            losses = [0]
+            steps = []
 
+    print(f'{episode:5d} : {np.mean(rewards):5.2f} '
+          f': {np.mean(losses):5.3f}: {np.mean(steps):5.2f}')
     return losses, rewards
 
 
 if __name__ == '__main__':
-    env = gym.make('CartPole-v1')
-    agent = Agent(1.0, 1.0,
+    # env = gym.make('CartPole-v1')
+    env = gym.make('LunarLander-v2')
+    agent = Agent(0.99, 0.5,
                   env.observation_space.shape,
                   [env.action_space.n])
 
-    learn(env, agent, 500)
+    learn(env, agent, 1000)
