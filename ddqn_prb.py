@@ -86,10 +86,9 @@ class DeepQN(nn.Module):
 
 class Agent:
     def __init__(self, epsilon, gamma, input_shape, output_shape):
-        self.input_shape = input_shape
-        self.output_shape = output_shape
         self.epsilon = epsilon
         self.gamma = gamma
+        self.output_shape = output_shape
 
         self.q_eval = DeepQN(input_shape, output_shape, [64, 64])
         self.q_target = DeepQN(input_shape, output_shape, [64, 64])
@@ -184,14 +183,14 @@ def learn(env, agent, episodes=500):
         steps.append(n_steps)
 
         if episode % (episodes // 10) == 0 and episode != 0:
-            print(f'{episode:5d} : {np.mean(rewards):6.3f} '
-                  f': {np.mean(losses):5.3f} : {np.mean(steps):6.3f}')
+            print(f'{episode:5d} : {np.mean(rewards):06.2f} '
+                  f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
             rewards = []
             losses = [0]
             steps = []
 
-    print(f'{episode:5d} : {np.mean(rewards):6.3f} '
-          f': {np.mean(losses):5.3f} : {np.mean(steps):6.3f}')
+    print(f'{episode:5d} : {np.mean(rewards):06.2f} '
+          f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
     return losses, rewards
 
 
