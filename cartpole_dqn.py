@@ -5,43 +5,27 @@ from torchviz import make_dot
 
 import gym
 import numpy as np
+from collections import deque
 
 
 class ReplayBuffer:
-    def __init__(self, mem_size, input_shape, output_shape):
-        self.mem_counter = 0
+    def __init__(self, mem_size):
         self.mem_size = mem_size
-        self.input_shape = input_shape
-
-        self.actions = np.zeros(mem_size)
-        self.states = np.zeros((mem_size, *input_shape))
-        self.states_ = np.zeros((mem_size, *input_shape))
-        self.rewards = np.zeros(mem_size)
-        self.terminals = np.zeros(mem_size)
+        self.buffer = deque(maxlen=mem_size)
 
     def sample(self, batch_size):
-        indices = np.random.choice(self.mem_size, batch_size)
-        return self.actions[indices], self.states[indices], \
-            self.states_[indices], self.rewards[indices], \
-            self.terminals[indices]
+        sample_size = min(batch_size, len(self.buffer))
+        sample_indices = np.random.choice(len(self.buffer), sample_size)
+        samples = np.array(self.buffer, dtype=object)[sample_indices]
+        return map(list, zip(*samples))
 
-    def store(self, action, state, state_, reward, terminal):
-        index = self.mem_counter % self.mem_size
-
-        self.actions[index] = action
-        self.states[index] = state
-        self.states_[index] = state_
-        self.rewards[index] = reward
-        self.terminals[index] = terminal
-        self.mem_counter += 1
+    def store(self, transition):
+        self.buffer.append(transition)
 
 
 class DeepQN(nn.Module):
     def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(DeepQN, self).__init__()
-
-        self.input_shape = input_shape
-        self.output_shape = output_shape
 
         layers = []
         layers.append(nn.Linear(*input_shape, hidden_layer_dims[0]))
@@ -50,7 +34,6 @@ class DeepQN(nn.Module):
         layers.append(nn.Linear(hidden_layer_dims[-1], *output_shape))
 
         self.layers = nn.ModuleList(layers)
-
         self.loss = nn.MSELoss()
         self.optimizer = T.optim.Adam(self.parameters(), lr=0.001)
 
@@ -60,24 +43,22 @@ class DeepQN(nn.Module):
         return self.layers[-1](states)
 
     def learn(self, predictions, targets):
-        self.optimizer.zero_grad()
         loss = self.loss(input=predictions, target=targets)
+
+        self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-
         return loss
 
 
 class Agent:
     def __init__(self, epsilon, gamma, input_shape, output_shape):
-        self.input_shape = input_shape
-        self.output_shape = output_shape
         self.epsilon = epsilon
         self.gamma = gamma
 
         self.q_eval = DeepQN(input_shape, output_shape, [64, 64])
         self.q_target = DeepQN(input_shape, output_shape, [64, 64])
-        self.memory = ReplayBuffer(10000, input_shape, output_shape)
+        self.memory = ReplayBuffer(10000)
 
         self.tau = 8
         self.batch_size = 32
@@ -100,27 +81,25 @@ class Agent:
             self.q_target.eval()
 
     def sample(self):
-        actions, states, states_, rewards, terminals = \
+        (actions, states, states_, rewards, terminals) = \
             self.memory.sample(self.batch_size)
 
         actions = T.tensor(actions).long()
         states = T.tensor(states).float()
         states_ = T.tensor(states_).float()
-        rewards = T.tensor(rewards).view(self.batch_size).float()
-        terminals = T.tensor(terminals).view(self.batch_size).long()
+        rewards = T.tensor(rewards).float()
+        terminals = T.tensor(terminals).long()
 
         return actions, states, states_, rewards, terminals
 
     def learn(self, state, action, state_, reward, done):
-        self.memory.store(action, state, state_, reward, done)
-
-        if self.memory.mem_counter < self.batch_size:
-            return
+        self.learn_step += 1
 
         self.q_eval.train()
-        self.learn_step += 1
+        self.memory.store((action, state, state_, reward, done))
+
         actions, states, states_, rewards, terminals = self.sample()
-        indices = np.arange(self.batch_size)
+        indices = np.arange(len(actions))
         q_eval = self.q_eval(states)[indices, actions]
         q_target = self.q_target(states_).detach().max(axis=1)[0]
         q_target = rewards + self.gamma * q_target * (1 - terminals)
@@ -164,14 +143,14 @@ def learn(env, agent, episodes=500):
         steps.append(n_steps)
 
         if episode % (episodes // 10) == 0 and episode != 0:
-            print(f'{episode:5d} : {np.mean(rewards):5.2f} '
-                  f': {np.mean(losses):5.3f}: {np.mean(steps):5.2f}')
+            print(f'{episode:5d} : {np.mean(rewards):6.3f} '
+                  f': {np.mean(losses):5.3f} : {np.mean(steps):6.3f}')
             rewards = []
             losses = [0]
             steps = []
 
-    print(f'{episode:5d} : {np.mean(rewards):5.2f} '
-          f': {np.mean(losses):5.3f}: {np.mean(steps):5.2f}')
+    print(f'{episode:5d} : {np.mean(rewards):6.3f} '
+          f': {np.mean(losses):5.3f} : {np.mean(steps):6.3f}')
     return losses, rewards
 
 
@@ -180,4 +159,4 @@ if __name__ == '__main__':
     # env = gym.make('LunarLander-v2')
     agent = Agent(1.0, 0.9, env.observation_space.shape, [env.action_space.n])
 
-    learn(env, agent, 1000)
+    learn(env, agent, 500)

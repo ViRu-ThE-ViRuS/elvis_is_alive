@@ -58,9 +58,6 @@ class DeepQN(nn.Module):
     def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(DeepQN, self).__init__()
 
-        self.input_shape = input_shape
-        self.output_shape = output_shape
-
         layers = []
         layers.append(nn.Linear(*input_shape, hidden_layer_dims[0]))
         for index, dim in enumerate(hidden_layer_dims[1:]):
@@ -187,14 +184,14 @@ def learn(env, agent, episodes=500):
         steps.append(n_steps)
 
         if episode % (episodes // 10) == 0 and episode != 0:
-            print(f'{episode:5d} : {np.mean(rewards):5.2f} '
-                  f': {np.mean(losses):5.3f} : {np.mean(steps):5.2f}')
+            print(f'{episode:5d} : {np.mean(rewards):6.3f} '
+                  f': {np.mean(losses):5.3f} : {np.mean(steps):6.3f}')
             rewards = []
             losses = [0]
             steps = []
 
-    print(f'{episode:5d} : {np.mean(rewards):5.2f} '
-          f': {np.mean(losses):5.3f} : {np.mean(steps):5.2f}')
+    print(f'{episode:5d} : {np.mean(rewards):6.3f} '
+          f': {np.mean(losses):5.3f} : {np.mean(steps):6.3f}')
     return losses, rewards
 
 
