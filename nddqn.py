@@ -20,7 +20,7 @@ class TransitionMemory:
         self.buffer.append(transition)
 
     def clear(self):
-        self.buffer = deque(maxlen=self.mem_size)
+        self.buffer.clear()
 
 
 class DeepQN(nn.Module):
