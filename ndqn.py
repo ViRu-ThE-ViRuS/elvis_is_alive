@@ -8,16 +8,10 @@ import numpy as np
 from collections import deque
 
 
-class ReplayBuffer:
+class TransitionMemory:
     def __init__(self, mem_size):
         self.mem_size = mem_size
         self.buffer = deque(maxlen=mem_size)
-
-    def sample(self, batch_size):
-        sample_size = min(batch_size, len(self.buffer))
-        sample_indices = np.random.choice(len(self.buffer), sample_size)
-        samples = np.array(self.buffer, dtype=object)[sample_indices]
-        return map(list, zip(*samples))
 
     def get_all(self, reverse=True):
         return map(list, zip(*reversed(self.buffer))) if reverse else map(list, zip(*self.buffer))
@@ -66,7 +60,7 @@ class Agent:
 
         self.q_eval = DeepQN(input_shape, output_shape, [64, 64])
         self.q_target = DeepQN(input_shape, output_shape, [64, 64])
-        self.memory = ReplayBuffer(self.n_step)
+        self.memory = TransitionMemory(self.n_step)
 
         self.tau = 8
         self.batch_size = 32
@@ -92,10 +86,9 @@ class Agent:
         (actions, states, states_, rewards, terminals) = self.memory.get_all(reverse=True)
         self.memory.clear()
 
-        discounted_rewards = np.zeros(len(rewards),)
-        _reward = 0
-        for index, (reward, terminal) in enumerate(zip(rewards, terminals)):
-            _reward = discounted_rewards[len(rewards) - index - 1] = reward * (1 - terminal) + self.gamma * _reward
+        discounted_rewards, _reward = np.zeros(len(rewards)), 0
+        for index, reward in enumerate(rewards):
+            _reward = discounted_rewards[index] = reward + self.gamma * _reward
 
         actions = T.tensor(actions).long()
         states = T.tensor(states).float()
@@ -174,4 +167,4 @@ if __name__ == '__main__':
     # env = gym.make('LunarLander-v2')
     agent = Agent(1.0, 0.9, env.observation_space.shape, [env.action_space.n])
 
-    learn(env, agent, 5000)
+    learn(env, agent, 2000)
