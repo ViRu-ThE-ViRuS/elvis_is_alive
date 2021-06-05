@@ -12,9 +12,6 @@ class DeepSarsaAgent(nn.Module):
     def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(DeepSarsaAgent, self).__init__()
 
-        self.input_shape = input_shape
-        self.output_shape = output_shape
-
         layers = []
         layers.append(nn.Linear(*input_shape, hidden_layer_dims[0]))
         for index, dim in enumerate(hidden_layer_dims[1:]):
@@ -22,7 +19,6 @@ class DeepSarsaAgent(nn.Module):
         layers.append(nn.Linear(hidden_layer_dims[-1], *output_shape))
 
         self.layers = nn.ModuleList(layers)
-
         self.loss = nn.MSELoss()
         self.optimizer = T.optim.Adam(self.parameters(), lr=0.001)
 
@@ -32,24 +28,26 @@ class DeepSarsaAgent(nn.Module):
         return self.layers[-1](states)
 
     def learn(self, predictions, targets):
-        self.optimizer.zero_grad()
         loss = self.loss(input=predictions, target=targets)
+
+        self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-
         return loss
 
 
 class Agent:
     def __init__(self, epsilon, gamma, input_shape, output_shape):
-        self.input_shape = input_shape
-        self.output_shape = output_shape
         self.epsilon = epsilon
         self.gamma = gamma
+        self.output_shape = output_shape
 
         self.q_eval = DeepSarsaAgent(input_shape, output_shape, [64, 64])
+        self.q_target = DeepSarsaAgent(input_shape, output_shape, [64, 64])
 
+        self.tau = 8
         self.learn_step = 0
+        self.update()
 
     def move(self, state):
         if np.random.random() < self.epsilon:
@@ -59,6 +57,11 @@ class Agent:
             state = T.tensor([state]).float()
             action = self.q_eval(state).max(axis=1)[1]
             return action.item()
+
+    def update(self):
+        if self.learn_step % self.tau == 0:
+            self.q_target.load_state_dict(self.q_eval.state_dict())
+            self.q_target.eval()
 
     def learn(self, state, action, state_, reward, done):
         self.learn_step += 1
@@ -70,14 +73,16 @@ class Agent:
 
         self.q_eval.train()
         q_eval = self.q_eval(state)[action]
-        q_next = self.q_eval(state_).detach().max(axis=0)[0]
+        q_next = self.q_target(state_).detach().max(axis=0)[0]
         q_target = reward + self.gamma * q_next * (1 - terminal)
+
         loss = self.q_eval.learn(q_eval, q_target)
+        self.epsilon *= 0.95 if self.epsilon > 0.1 else 1.0
 
         # visualize
         # make_dot(loss, params=dict(self.q_eval.named_parameters())).render("attached")
 
-        self.epsilon *= 0.95 if self.epsilon > 0.1 else 1.0
+        self.update()
         return loss.item()
 
 
@@ -110,19 +115,19 @@ def learn(env, agent, episodes=500):
         steps.append(n_steps)
 
         if episode % (episodes // 10) == 0 and episode != 0:
-            print(f'{episode:5d} : {np.mean(rewards):5.2f} '
-                  f': {np.mean(losses):5.3f}: {np.mean(steps):5.2f}')
+            print(f'{episode:5d} : {np.mean(rewards):06.2f} '
+                  f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
             rewards = []
             losses = [0]
             steps = []
 
-    print(f'{episode:5d} : {np.mean(rewards):5.2f} '
-          f': {np.mean(losses):5.3f}: {np.mean(steps):5.2f}')
+    print(f'{episode:5d} : {np.mean(rewards):06.2f} '
+          f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
     return losses, rewards
 
 
 if __name__ == '__main__':
     env = gym.make('CartPole-v1')
-    agent = Agent(0.99, 0.9, env.observation_space.shape, [env.action_space.n])
+    agent = Agent(1.0, 0.9, env.observation_space.shape, [env.action_space.n])
 
-    learn(env, agent, 1000)
+    learn(env, agent, 500)
