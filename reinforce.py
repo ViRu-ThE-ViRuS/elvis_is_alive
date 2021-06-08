@@ -1,17 +1,15 @@
 import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
+from torchviz import make_dot
 
-import numpy as np
 import gym
+import numpy as np
 
 
 class PolicyNetwork(nn.Module):
     def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(PolicyNetwork, self).__init__()
-
-        self.input_shape = input_shape
-        self.output_shape = output_shape
 
         layers = []
         layers.append(nn.Linear(*input_shape, hidden_layer_dims[0]))
@@ -25,38 +23,36 @@ class PolicyNetwork(nn.Module):
     def forward(self, states):
         for layer in self.layers[:-1]:
             states = F.relu(layer(states))
-        return self.layers[-1](states)
+        return F.softmax(self.layers[-1](states), dim=0)
 
 
 class Agent(object):
     def __init__(self, epsilon, gamma, input_shape, output_shape):
-        self.input_shape = input_shape
-        self.output_shape = output_shape
         self.epsilon = epsilon
         self.gamma = gamma
 
-        self.policy = PolicyNetwork(input_shape, output_shape, [64, 128])
+        self.policy = PolicyNetwork(input_shape, output_shape, [64, 64])
         self.action_memory = []
         self.reward_memory = []
 
     def move(self, state):
-        action_probs = F.softmax(self.policy(T.tensor(state, dtype=T.float)),
-                                 dim=0)
+        self.policy.eval()
+        action_probs = self.policy(T.tensor(state, dtype=T.float))
         distribution = T.distributions.Categorical(action_probs)
         action_taken = distribution.sample()
-        log_probs = distribution.log_prob(action_taken)
+        log_prob = distribution.log_prob(action_taken)
 
-        self.action_memory.append(log_probs)
+        self.action_memory.append(log_prob)
         return action_taken.item()
 
     def store_reward(self, reward):
         self.reward_memory.append(reward)
 
     def learn(self):
+        self.policy.train()
         self.policy.optimizer.zero_grad()
-        G = np.zeros_like(self.reward_memory)
 
-        G_current = 0
+        G, G_current = np.zeros_like(self.reward_memory), 0
         for index, step in reversed(list(enumerate(self.reward_memory))):
             G_current += step * (self.gamma ** (index-1))
             G[index] = G_current
@@ -77,11 +73,10 @@ class Agent(object):
 
 
 def learn(env, agent, episodes=500):
-    print('Episode: 5 Episode Mean Reward: Last Loss: 5 Episode Mean Step'
-          ' : Last Reward')
+    print('Episode: Mean Reward: Mean Loss: Mean Step')
 
     rewards = []
-    losses = []
+    losses = [0]
     steps = []
     num_episodes = episodes
     for episode in range(num_episodes):
@@ -104,18 +99,21 @@ def learn(env, agent, episodes=500):
         steps.append(n_steps)
         losses.append(loss)
 
-        if episode % (episodes//10) == 0 and episode != 0:
-            print(f'{episode:5d} : {np.mean(rewards[-5:]):5.2f} '
-                  f': {losses[-1]: 5.2f}: {np.mean(steps[-5:]): 5.2f} '
-                  f': {rewards[-1]: 3f}')
+        if episode % (episodes // 10) == 0 and episode != 0:
+            print(f'{episode:5d} : {np.mean(rewards):06.2f} '
+                  f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
+            rewards = []
+            losses = [0]
+            steps = []
 
+    print(f'{episode:5d} : {np.mean(rewards):06.2f} '
+          f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
     return losses, rewards
 
 
 if __name__ == '__main__':
     env = gym.make('CartPole-v1')
-    agent = Agent(1.0, 1.0,
-                  env.observation_space.shape,
-                  [env.action_space.n])
+    # env = gym.make('LunarLander-v2')
+    agent = Agent(1.0, 0.9, env.observation_space.shape, [env.action_space.n])
 
     learn(env, agent, 500)
