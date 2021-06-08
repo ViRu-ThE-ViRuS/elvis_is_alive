@@ -27,8 +27,7 @@ class PolicyNetwork(nn.Module):
 
 
 class Agent(object):
-    def __init__(self, epsilon, gamma, input_shape, output_shape):
-        self.epsilon = epsilon
+    def __init__(self, gamma, input_shape, output_shape):
         self.gamma = gamma
 
         self.policy = PolicyNetwork(input_shape, output_shape, [64, 64])
@@ -114,6 +113,6 @@ def learn(env, agent, episodes=500):
 if __name__ == '__main__':
     env = gym.make('CartPole-v1')
     # env = gym.make('LunarLander-v2')
-    agent = Agent(1.0, 0.9, env.observation_space.shape, [env.action_space.n])
+    agent = Agent(0.9, env.observation_space.shape, [env.action_space.n])
 
     learn(env, agent, 500)
