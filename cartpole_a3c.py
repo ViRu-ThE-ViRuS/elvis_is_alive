@@ -55,7 +55,7 @@ def train(shared_model, rank):
     optimizer = optim.Adam(shared_model.parameters(), lr=learning_rate)
     env = create_env()
 
-    for episode in range(max_test_ep):
+    for episode in range(max_train_ep):
         done = False
         state = env.reset()
 
