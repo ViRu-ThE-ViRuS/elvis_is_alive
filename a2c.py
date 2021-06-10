@@ -37,7 +37,7 @@ class ActorCriticNetwork(nn.Module):
         self.critic = nn.Linear(hidden_layer_dims[-1], 1)
 
         self.layers = nn.ModuleList(layers)
-        self.optimizer = T.optim.Adam(self.parameters())
+        self.optimizer = T.optim.Adam(self.parameters(), lr=0.005)
 
     def forward(self, states):
         for layer in self.layers:
@@ -63,41 +63,38 @@ class Agent(object):
     def store(self, transition):
         self.memory.store(transition)
 
-    def get_all(self, clear=True):
+    def evaluate(self, clear=True):
         actions, states, states_, rewards, terminals = self.memory.get_all(clear=clear)
+        log_probs, state_values, dist_entropy = self._evaluate(states, actions)
 
-        discounted_rewards, _r = np.zeros_like(rewards), 0
-        for index, (reward, terminal) in enumerate(zip(reversed(rewards), reversed(terminals))):
-            discounted_rewards[len(rewards) - index - 1] = _r = reward * (1 - terminal) + self.gamma * _r
-        rewards = T.tensor(discounted_rewards).float()
-        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
+        discounted_rewards, R = np.zeros_like(rewards), 0 if not terminals[-1] else state_values[-1].item()
+        for index, reward in enumerate(rewards[::-1]):
+            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R
+        rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
+        rewards = T.tensor(rewards).float()
 
-        actions = T.tensor(actions).long()
-        states = T.tensor(states).float()
-        states_ = T.tensor(states_).float()
-        terminals = T.tensor(terminals).long
+        return log_probs, rewards, state_values, dist_entropy
 
-        return actions, states, states_, rewards, terminals
+    def _evaluate(self, state, action):
+        state = T.tensor(state).float()
+        action = T.tensor(action).float()
 
-    def evaluate(self, state, action):
         action_probs, state_value = self.actor_critic(state)
         dist = T.distributions.Categorical(action_probs)
 
-        log_probs = dist.log_prob(action)
+        log_prob = dist.log_prob(action)
         dist_entropy = dist.entropy()
-        return log_probs, T.squeeze(state_value), dist_entropy
+        return log_prob, T.squeeze(state_value), dist_entropy
 
     def learn(self):
         self.actor_critic.train()
 
-        actions, states, states_, rewards, terminals = self.get_all(clear=True)
-        log_probs, state_values, dist_entropy = self.evaluate(states, actions)
-
+        log_probs, rewards, state_values, dist_entropy = self.evaluate(clear=True)
         advantage = rewards - state_values
 
-        actor_loss = -log_probs * advantage
+        actor_loss = -log_probs * advantage.detach()
         critic_loss = advantage ** 2
-        entropy_loss = dist_entropy
+        entropy_loss = -dist_entropy * 0.001
         loss = (actor_loss + critic_loss + entropy_loss).mean()
 
         self.actor_critic.optimizer.zero_grad()

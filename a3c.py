@@ -9,6 +9,21 @@ import gym
 from collections import deque
 
 
+class SharedAdam(T.optim.Adam):
+    def __init__(self, *args, **kwargs):
+        super(SharedAdam, self).__init__(*args, **kwargs)
+
+        for group in self.param_groups:
+            for param in group['params']:
+                state = self.state[param]
+                state['step'] = 0
+                state['exp_avg'] = T.zeros_like(param.data)
+                state['exp_avg_sq'] = T.zeros_like(param.data)
+
+                state['exp_avg'].share_memory_()
+                state['exp_avg_sq'].share_memory_()
+
+
 class TransitionBuffer:
     def __init__(self):
         self.buffer = deque()
@@ -56,9 +71,11 @@ class Agent(object):
         self.actor_critic = ActorCriticNetwork(env.observation_space.shape, [env.action_space.n], [128])
         self.actor_critic.share_memory()
 
+        self.optimizer = SharedAdam(self.actor_critic.parameters(), lr=0.001)
+
         self.episode, self.reward, self.result_queue = mp.Value('i', 0), mp.Value('d', 0), mp.Queue()
         self.workers = [LocalAgent(gamma, env_name, max_episodes,
-                                   self.actor_critic, self.episode, self.reward, self.result_queue, i)
+                                   self.actor_critic, self.optimizer, self.episode, self.reward, self.result_queue, i)
                         for i in range(mp.cpu_count())]
 
     def train(self):
@@ -78,10 +95,11 @@ class Agent(object):
 
 class LocalAgent(mp.Process):
     def __init__(self, gamma, env_name, max_episodes,
-                 model, global_episodes, global_rewards, global_result_queue, name):
+                 model, optimizer, global_episodes, global_rewards, global_result_queue, name):
         super(LocalAgent, self).__init__()
 
         self.global_model = model
+        self.global_optimizer = optimizer
         self.global_episodes = global_episodes
         self.global_rewards = global_rewards
         self.global_result_queue = global_result_queue
@@ -93,7 +111,6 @@ class LocalAgent(mp.Process):
         self.memory = TransitionBuffer()
 
         self.actor_critic = ActorCriticNetwork(self.env.observation_space.shape, [self.env.action_space.n], [128])
-        self.optimizer = T.optim.Adam(self.global_model.parameters(), lr=0.0005)
 
         self.sync()
 
@@ -122,14 +139,14 @@ class LocalAgent(mp.Process):
     def push_grads(self):
         loss = self.calculate_loss()
 
-        self.optimizer.zero_grad()
+        self.global_optimizer.zero_grad()
         loss.backward()
 
         for local_param, global_param in zip(self.actor_critic.parameters(),
                                              self.global_model.parameters()):
             global_param._grad = local_param.grad
 
-        self.optimizer.step()
+        self.global_optimizer.step()
         self.sync()
 
         return loss.item()
@@ -151,27 +168,26 @@ class LocalAgent(mp.Process):
 
     def evaluate(self, clear=True):
         actions, states, states_, rewards, terminals = self.memory.get_all(clear=clear)
-
-        actions = T.tensor(actions).long()
-        states = T.tensor(states).float()
-
         log_probs, state_values, dist_entropy = self._evaluate(states, actions)
 
-        discounted_rewards = np.zeros_like(rewards)
-        R = 0.0 if terminals[-1] else state_values[-1].item()
-        for index, reward in enumerate(reversed(rewards)):
+        discounted_rewards, R = np.zeros_like(rewards), 0 if not terminals[-1] else state_values[-1].item()
+        for index, reward in enumerate(rewards[::-1]):
             discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R
-        discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
-        discounted_rewards = T.tensor(discounted_rewards).float()
+        rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
+        rewards = T.tensor(rewards).float()
 
-        return log_probs, state_values, dist_entropy, discounted_rewards
+        return log_probs, rewards, state_values, dist_entropy
 
     def _evaluate(self, state, action):
+        state = T.tensor(state).float()
+        action = T.tensor(action).float()
+
         action_probs, state_value = self.actor_critic(state)
         dist = T.distributions.Categorical(action_probs)
-        log_probs = dist.log_prob(action)
+
+        log_prob = dist.log_prob(action)
         dist_entropy = dist.entropy()
-        return log_probs, T.squeeze(state_value), dist_entropy
+        return log_prob, T.squeeze(state_value), dist_entropy
 
     def move(self, state):
         self.actor_critic.eval()
@@ -182,13 +198,13 @@ class LocalAgent(mp.Process):
     def calculate_loss(self):
         self.actor_critic.train()
 
-        log_probs, state_values, dist_entropy, discounted_rewards = self.evaluate(clear=True)
-        advantage = discounted_rewards - state_values
+        log_probs, rewards, state_values, dist_entropy = self.evaluate(clear=True)
+        advantage = rewards - state_values
 
         actor_loss = -log_probs * advantage.detach()
         critic_loss = advantage ** 2
-        entropy_loss = -dist_entropy  # with entropy regularizer
-        loss = (actor_loss + critic_loss + 0.001 * entropy_loss).mean()
+        entropy_loss = -dist_entropy * 0.001
+        loss = (actor_loss + critic_loss + entropy_loss).mean()
 
         # visualize
         # make_dot(loss, params=dict(self.actor_critic.named_parameters())).render("attached")
