@@ -13,14 +13,15 @@ class TransitionMemory:
         self.mem_size = mem_size
         self.buffer = deque(maxlen=mem_size)
 
-    def get_all(self, reverse=True):
-        return map(list, zip(*reversed(self.buffer))) if reverse else map(list, zip(*self.buffer))
+    def get_all(self, clear=True):
+        transitions = map(list, zip(*self.buffer))
+        if clear:
+            self.buffer.clear()
+
+        return transitions
 
     def store(self, transition):
         self.buffer.append(transition)
-
-    def clear(self):
-        self.buffer.clear()
 
 
 class DeepQN(nn.Module):
@@ -82,21 +83,32 @@ class Agent:
             self.q_target.load_state_dict(self.q_eval.state_dict())
             self.q_target.eval()
 
-    def get_all(self):
-        (actions, states, states_, rewards, terminals) = self.memory.get_all(reverse=True)
-        self.memory.clear()
+    def evaluate(self):
+        (actions, states, states_, rewards, terminals) = self.memory.get_all(clear=True)
 
-        discounted_rewards, _reward = np.zeros(len(rewards)), 0
-        for index, reward in enumerate(rewards):
-            _reward = discounted_rewards[index] = reward + self.gamma * _reward
+        q_eval = self._evaluate(states, actions)
+        target_actions = self._evaluate(states_)
+        q_target = self._evaluate(states_, target_actions, target=True)
 
-        actions = T.tensor(actions).long()
-        states = T.tensor(states).float()
-        states_ = T.tensor(states_).float()
-        rewards = T.tensor(discounted_rewards).float()
-        terminals = T.tensor(terminals).long()
+        discounted_rewards, R = np.zeros_like(rewards), 0 if not terminals[-1] else q_target[-1].item()
+        for index, reward in enumerate(rewards[::-1]):
+            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R
+        rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
+        rewards = T.tensor(rewards).float()
 
-        return actions, states, states_, rewards, terminals
+        return rewards, q_eval, q_target
+
+    def _evaluate(self, states, actions=None, target=False):
+        if actions is None:
+            return self.q_eval(T.tensor(states).float()).detach().max(axis=1)[1]
+        elif actions is not None and not target:
+            indices = np.arange(len(actions))
+            return self.q_eval(T.tensor(states).float())[indices, T.tensor(actions).long()]
+        else:
+            indices = np.arange(len(actions))
+            return self.q_target(T.tensor(states).float()).detach()[indices, actions]
+
+        return self.q_eval(states)
 
     def learn(self, state, action, state_, reward, done):
         self.learn_step += 1
@@ -106,13 +118,8 @@ class Agent:
             return
 
         self.q_eval.train()
-        actions, states, states_, rewards, terminals = self.get_all()
-
-        indices = np.arange(len(actions))
-        q_eval = self.q_eval(states)[indices, actions]
-        target_actions = self.q_eval(states_).detach().max(axis=1)[1]
-        q_target = self.q_target(states_).detach()[indices, target_actions]
-        q_target = rewards + self.gamma * q_target * (1 - terminals)
+        rewards, q_eval, q_target = self.evaluate()
+        q_target = rewards + (self.gamma ** self.n_step) * q_target
 
         loss = self.q_eval.learn(q_eval, q_target)
         self.epsilon *= 0.95 if self.epsilon > 0.1 else 1.0
