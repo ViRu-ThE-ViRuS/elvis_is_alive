@@ -33,8 +33,14 @@ class ActorCriticNetwork(nn.Module):
         for index, dim in enumerate(hidden_layer_dims[1:]):
             layers.append(nn.Linear(hidden_layer_dims[index], dim))
 
+        for layer in layers:
+            T.nn.init.orthogonal_(layer.weight.data)
+
         self.actor = nn.Linear(hidden_layer_dims[-1], *output_shape)
         self.critic = nn.Linear(hidden_layer_dims[-1], 1)
+
+        T.nn.init.orthogonal_(self.actor.weight.data)
+        T.nn.init.orthogonal_(self.critic.weight.data)
 
         self.layers = nn.ModuleList(layers)
         self.optimizer = T.optim.Adam(self.parameters(), lr=0.005)
