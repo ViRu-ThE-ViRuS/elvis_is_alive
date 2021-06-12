@@ -1,6 +1,7 @@
 import torch as T
 import torch.nn as nn
 from torch.distributions import Categorical
+from torchviz import make_dot
 import gym
 
 device = 'cuda:0' if T.cuda.is_available() else 'cpu'
@@ -112,10 +113,14 @@ class PPO:
             loss_vf = 0.5 * self.loss(state_values, rewards)
             loss_entropy = -0.01 * dist_entropy  # encourage exploration
 
-            loss = loss_clip + loss_vf + loss_entropy
+            loss = (loss_clip + loss_vf + loss_entropy).mean()
+
+            # visualize
+            # make_dot(loss, params=dict(self.policy.named_parameters())).render("attached")
+            # raise SystemError
 
             self.optimizer.zero_grad()
-            loss.mean().backward()
+            loss.backward()
             self.optimizer.step()
 
         self.policy_old.load_state_dict(self.policy.state_dict())
@@ -159,7 +164,6 @@ def main():
             if timestep % update_timestep == 0:
                 ppo.update(memory)
                 memory.clear()
-                timestep = 0
 
             total_reward += reward
             if done:
