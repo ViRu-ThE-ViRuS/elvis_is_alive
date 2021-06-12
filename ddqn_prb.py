@@ -96,7 +96,7 @@ class Agent:
 
         self.learn_step = 0
         self.tau = 8
-        self.batch_size = 32
+        self.batch_size = 64
         self.epsilon_link = False
 
         self.update()

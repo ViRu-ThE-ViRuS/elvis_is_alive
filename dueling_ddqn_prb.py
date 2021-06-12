@@ -104,7 +104,7 @@ class Agent:
         self.memory = PrioritizedReplayBuffer(10000)
 
         self.tau = 8
-        self.batch_size = 32
+        self.batch_size = 64
         self.learn_step = 0
         self.epsilon_link = False
 

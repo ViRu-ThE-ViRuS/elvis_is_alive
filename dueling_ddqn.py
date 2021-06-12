@@ -71,7 +71,7 @@ class Agent:
         self.memory = ReplayBuffer(10000)
 
         self.tau = 8
-        self.batch_size = 32
+        self.batch_size = 128
         self.learn_step = 0
 
         self.update()

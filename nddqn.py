@@ -64,7 +64,6 @@ class Agent:
         self.memory = TransitionMemory(self.n_step)
 
         self.tau = 8
-        self.batch_size = 32
         self.learn_step = 0
 
         self.update()
