@@ -89,11 +89,11 @@ class Agent:
         q_eval = self._evaluate(states, actions)
         q_target = self._evaluate(states_)
 
-        discounted_rewards, R = np.zeros_like(rewards), 0 if not terminals[-1] else q_target[-1].item()
-        for index, reward in enumerate(rewards[::-1]):
-            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R
-        rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
-        rewards = T.tensor(rewards).float()
+        discounted_rewards, R = np.zeros_like(rewards), 0
+        for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
+            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
+        discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
+        rewards = T.tensor(discounted_rewards).float()
 
         return rewards, q_eval, q_target
 

@@ -73,11 +73,11 @@ class Agent(object):
         actions, states, states_, rewards, terminals = self.memory.get_all(clear=clear)
         log_probs, state_values, dist_entropy = self._evaluate(states, actions)
 
-        discounted_rewards, R = np.zeros_like(rewards), 0 if not terminals[-1] else state_values[-1].item()
-        for index, reward in enumerate(rewards[::-1]):
-            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R
-        rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
-        rewards = T.tensor(rewards).float()
+        discounted_rewards, R = np.zeros_like(rewards), 0
+        for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
+            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
+        discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
+        rewards = T.tensor(discounted_rewards).float()
 
         return log_probs, rewards, state_values, dist_entropy
 
