@@ -127,9 +127,9 @@ class PPO:
 
 
 def main():
-    env = gym.make('LunarLander-v2')
+    env = gym.make('CartPole-v1')
     state_dim = env.observation_space.shape[0]
-    action_dim = 4
+    action_dim = 2
 
     interval = 20
     max_episodes = 50000

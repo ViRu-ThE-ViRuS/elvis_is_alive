@@ -7,7 +7,7 @@ import numpy as np
 import gym
 from collections import deque
 
-T.manual_seed(0)
+# {{{ TransitionMemory
 
 
 class TransitionMemory:
@@ -24,6 +24,9 @@ class TransitionMemory:
 
     def store(self, transition):
         self.buffer.append(transition)
+# }}}
+
+# {{{ ActorCriticNetwork
 
 
 class ActorCriticNetwork(nn.Module):
@@ -45,6 +48,8 @@ class ActorCriticNetwork(nn.Module):
         self.actor_layers = nn.ModuleList(actor_layers)
         self.critic_layers = nn.ModuleList(critic_layers)
 
+        self.critic_loss = T.nn.MSELoss()
+
     def forward(self, states):
         x_actor = states.clone()
         for actor in self.actor_layers[:-1]:
@@ -65,42 +70,28 @@ class ActorCriticNetwork(nn.Module):
         log_probs = policy_dist.log_prob(actions)
         dist_entropy = policy_dist.entropy()
         return log_probs, T.squeeze(state_values), dist_entropy
+# }}}
 
-    def critic_loss(self, state_values, rewards):
-        return F.mse_loss(input=state_values, target=rewards)
+# {{{ Agent
 
 
 class Agent(object):
     def __init__(self, gamma, input_shape, output_shape,
-                 batch_size=32, epsilon_clip=0.2, K=10, c1=1.0, c2=0.01,
-                 lr_link=True, initial_lr=2.5 * 10e-4):
+                 update_interval=2000, epsilon_clip=0.2, K=10, c1=1.0, c2=0.01):
         self.gamma = gamma
-        self.update_interval = batch_size * K
+        self.update_interval = update_interval
         self.epsilon_clip = epsilon_clip
         self.K = K
         self.c1 = c1
         self.c2 = c2
         self.learn_step = 0
 
-        self.lr_link = lr_link
-        self.initial_lr = initial_lr
-        self.lr_frames = 500
-
         self.policy = ActorCriticNetwork(input_shape, output_shape, [64, 64])
         self.policy_old = ActorCriticNetwork(input_shape, output_shape, [64, 64])
+        self.optimizer = T.optim.Adam(self.policy.parameters(), lr=0.001)
         self.memory = TransitionMemory(self.update_interval)
 
-        self.optimizer = T.optim.Adam(self.policy.parameters(), lr=initial_lr if lr_link else 0.002, betas=(0.9, 0.999))
-
-        if lr_link:
-            self.scheduler = T.optim.lr_scheduler.StepLR(self.optimizer, step_size=K, gamma=0.95)
-            self.epsilon_clip = 0.1 * self.lr
-
         self.update()
-
-    @property
-    def lr(self):
-        return self.scheduler.get_last_lr()[0]
 
     def move(self, state):
         action_probs, _ = self.policy_old(T.tensor(state).float())
@@ -129,9 +120,6 @@ class Agent(object):
     def update(self):
         self.policy_old.load_state_dict(self.policy.state_dict())
         self.policy_old.eval()
-
-        if self.lr_link and self.learn_step != 0:
-            self.scheduler.step()
 
     def learn(self):
         states, actions, rewards, old_log_probs = self.evaluate()
@@ -198,23 +186,23 @@ def learn(env, agent, episodes=500):
         rewards.append(total_reward)
         steps.append(n_steps)
 
-        # if episode % (episodes // 10) == 0 and episode != 0:
-        if episode % 20 == 0 and episode != 0:
+        if episode % (episodes // 10) == 0 and episode != 0:
             print(f'{episode:5d} : {np.mean(rewards):06.2f} '
                   f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
             rewards = []
-            losses = [0]
+            # losses = [0]
             steps = []
 
     print(f'{episode:5d} : {np.mean(rewards):06.2f} '
           f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
     return losses, rewards
+# }}}
 
 
 if __name__ == '__main__':
-    # env = gym.make('CartPole-v1')
-    env = gym.make('LunarLander-v2')
-    agent = Agent(0.9, env.observation_space.shape, [env.action_space.n],
-                  batch_size=500, K=4, c1=1.0, lr_link=True)
+    env = gym.make('CartPole-v1')
+    # env = gym.make('LunarLander-v2')
+    agent = Agent(0.99, env.observation_space.shape, [env.action_space.n],
+                  update_interval=2000, K=4, c1=1.0)
 
-    learn(env, agent, 5000)
+    learn(env, agent, 1000)
