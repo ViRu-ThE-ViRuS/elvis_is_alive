@@ -33,14 +33,12 @@ class ActorCriticNetwork(nn.Module):
     def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(ActorCriticNetwork, self).__init__()
 
-        actor_layers = []
-        actor_layers.append(nn.Linear(*input_shape, hidden_layer_dims[0]))
+        actor_layers = [nn.Linear(*input_shape, hidden_layer_dims[0])]
         for index, dim in enumerate(hidden_layer_dims[1:]):
             actor_layers.append(nn.Linear(hidden_layer_dims[index], dim))
         actor_layers.append(nn.Linear(hidden_layer_dims[-1], *output_shape))
 
-        critic_layers = []
-        critic_layers.append(nn.Linear(*input_shape, hidden_layer_dims[0]))
+        critic_layers = [nn.Linear(*input_shape, hidden_layer_dims[0])]
         for index, dim in enumerate(hidden_layer_dims[1:]):
             critic_layers.append(nn.Linear(hidden_layer_dims[index], dim))
         critic_layers.append(nn.Linear(hidden_layer_dims[-1], 1))
