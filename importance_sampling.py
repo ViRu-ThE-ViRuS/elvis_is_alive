@@ -98,9 +98,11 @@ class Agent(object):
             log_probs, dist_entropy = self.policy.evaluate(states, actions)
 
             importance_sampling, baseline, Z, len_counter = np.zeros_like(old_log_probs.detach()), 0, 0, 0
-            for index, (p, q, reward, done) in enumerate(zip(log_probs.data.numpy()[::-1], old_log_probs.data.numpy()[::-1], rewards.data.numpy()[::-1], dones[::-1])):
+            for index, (p, q, reward, done) in enumerate(zip(log_probs.data.numpy()[::-1],
+                                                             old_log_probs.data.numpy()[::-1],
+                                                             rewards.data.numpy()[::-1],
+                                                             dones[::-1])):
                 ratio = np.exp(p - q)
-
                 importance_sampling[len(importance_sampling) - index - 1] = ratio
 
                 Z = reward + Z * self.gamma * (1 - done)

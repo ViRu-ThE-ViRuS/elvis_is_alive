@@ -65,6 +65,11 @@ class Agent:
             action = self.q_eval(state).max(axis=1)[1]
             return action.item()
 
+    def evaluate(self, states):
+        self.q_eval.eval()
+        actions = self.q_eval(states).max(axis=-1)[1]
+        return actions.detach()
+
     def update(self):
         if self.learn_step % self.tau == 0:
             self.q_target.load_state_dict(self.q_eval.state_dict())
@@ -72,15 +77,17 @@ class Agent:
 
     def learn(self, state, action, state_, reward, done):
         self.learn_step += 1
+        self.q_eval.train()
+
         action = T.tensor(action).long()
         state = T.tensor(state).float()
         state_ = T.tensor(state_).float()
         reward = T.tensor(reward).float()
         terminal = T.tensor(done).long()
 
-        self.q_eval.train()
+        action_next = self.evaluate(state_)
         q_eval = self.q_eval(state)[action]
-        q_next = self.q_target(state_).detach().max(axis=0)[0]
+        q_next = self.q_target(state_)[action_next]
         q_target = reward + self.gamma * q_next * (1 - terminal)
 
         loss = self.q_eval.learn(q_eval, q_target)
