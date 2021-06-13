@@ -87,12 +87,21 @@ class Agent(object):
         log_probs, state_values, state_values_, dist_entropy = self._evaluate(states, states_, actions)
         state_values_ = state_values_.detach()
 
+        rewards, terminals = np.array(rewards), np.array(terminals)
+
+        discounted_rewards, R = np.zeros_like(rewards), 0
+        for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
+            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
+
         n_step_rewards = np.zeros_like(rewards)
-        gamma_map = [self.gamma ** i for i in range(self.n_steps)]
         for index in range(len(rewards)):
-            n_step_rollout = rewards[index:min(len(rewards), index+self.n_steps)]
-            n_step_rewards[index] = (gamma_map[:len(n_step_rollout)] * np.array(n_step_rollout)).sum()
-            n_step_rewards[index] += (self.gamma ** (len(n_step_rollout) + 1)) * state_values_[index]
+            n_step_rollout = discounted_rewards[index:(min(len(rewards), index+self.n_steps))]
+            next_done = np.where(terminals[index:min(len(rewards), index + self.n_steps)] == 1)[0]
+
+            if len(next_done) != 0:
+                n_step_rollout = n_step_rollout[:next_done[0]+1]
+            n_step_rewards[index] = n_step_rollout.sum() + (self.gamma ** self.n_steps * state_values_[index])
+
         rewards = (n_step_rewards - n_step_rewards.mean()) / (n_step_rewards.std() + 1e-5)
         rewards = T.tensor(rewards).float()
 
@@ -105,7 +114,7 @@ class Agent(object):
 
         self.policy.eval()
         action_probs, state_values = self.policy(states)
-        _, state_values_ = self.policy(states_)
+        _, state_values_ = self.policy_old(states_)
 
         dist = T.distributions.Categorical(action_probs)
         log_probs = dist.log_prob(actions)
@@ -178,6 +187,6 @@ if __name__ == '__main__':
     env = gym.make('CartPole-v1')
     # env = gym.make('LunarLander-v2')
     agent = Agent(0.99, env.observation_space.shape, [env.action_space.n],
-                  n_steps=5, entropy_coeff=0.001, critic_coeff=0.5, lr=0.001)
+                  n_steps=10, entropy_coeff=0.001, critic_coeff=0.5, lr=0.001)
 
-    learn(env, agent, 500)
+    learn(env, agent, 1000)

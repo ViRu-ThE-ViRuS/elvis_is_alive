@@ -53,15 +53,15 @@ class DeepQN(nn.Module):
 
 
 class Agent:
-    def __init__(self, epsilon, gamma, input_shape, output_shape):
+    def __init__(self, epsilon, gamma, input_shape, output_shape, n_steps=10):
         self.epsilon = epsilon
         self.gamma = gamma
         self.output_shape = output_shape
-        self.n_step = 16
+        self.n_steps = n_steps
 
         self.q_eval = DeepQN(input_shape, output_shape, [64, 64])
         self.q_target = DeepQN(input_shape, output_shape, [64, 64])
-        self.memory = TransitionMemory(self.n_step)
+        self.memory = TransitionMemory(self.n_steps)
 
         self.tau = 8
         self.learn_step = 0
@@ -89,11 +89,22 @@ class Agent:
         target_actions = self._evaluate(states_)
         q_target = self._evaluate(states_, target_actions, target=True)
 
+        rewards, terminals = np.array(rewards), np.array(terminals)
+
         discounted_rewards, R = np.zeros_like(rewards), 0
         for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
             discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
-        discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
-        rewards = T.tensor(discounted_rewards).float()
+
+        n_step_rewards = np.zeros_like(rewards)
+        for index in range(len(rewards)):
+            n_step_rollout = discounted_rewards[index:(min(len(rewards), index+self.n_steps))]
+            next_done = np.where(terminals[index:min(len(rewards), index + self.n_steps)] == 1)[0]
+
+            if len(next_done) != 0:
+                n_step_rollout = n_step_rollout[:next_done[0]+1]
+            n_step_rewards[index] = n_step_rollout.sum() + (self.gamma ** len(n_step_rollout) * q_target[index])
+        n_step_rewards = (n_step_rewards - n_step_rewards.mean()) / (n_step_rewards.std() + 1e-5)
+        rewards = T.tensor(n_step_rewards).float()
 
         return rewards, q_eval, q_target
 
@@ -113,12 +124,12 @@ class Agent:
         self.learn_step += 1
         self.memory.store((action, state, state_, reward, done))
 
-        if self.learn_step % self.n_step:
+        if self.learn_step % self.n_steps:
             return
 
         self.q_eval.train()
         rewards, q_eval, q_target = self.evaluate()
-        q_target = rewards + (self.gamma ** self.n_step) * q_target
+        q_target = rewards  # + (self.gamma ** self.n_step) * q_target
 
         loss = self.q_eval.learn(q_eval, q_target)
         self.epsilon *= 0.95 if self.epsilon > 0.1 else 1.0
@@ -173,6 +184,7 @@ def learn(env, agent, episodes=500):
 if __name__ == '__main__':
     env = gym.make('CartPole-v1')
     # env = gym.make('LunarLander-v2')
-    agent = Agent(1.0, 0.9, env.observation_space.shape, [env.action_space.n])
+    agent = Agent(1.0, 0.99, env.observation_space.shape, [env.action_space.n],
+                  n_steps=10)
 
     learn(env, agent, 2000)

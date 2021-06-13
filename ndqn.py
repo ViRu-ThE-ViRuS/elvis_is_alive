@@ -53,7 +53,7 @@ class DeepQN(nn.Module):
 
 
 class Agent:
-    def __init__(self, epsilon, gamma, input_shape, output_shape, n_steps=4):
+    def __init__(self, epsilon, gamma, input_shape, output_shape, n_steps=10):
         self.epsilon = epsilon
         self.gamma = gamma
         self.output_shape = output_shape
@@ -86,24 +86,24 @@ class Agent:
         (actions, states, states_, rewards, terminals) = self.memory.get_all(clear=True)
 
         q_eval = self._evaluate(states, actions)
-        q_target = self._evaluate(states_)
+        q_target = self._evaluate(states_).detach()
 
-        terminals = np.array(terminals)
-        rewards = np.array(rewards)
+        rewards, terminals = np.array(rewards), np.array(terminals)
+
+        discounted_rewards, R = np.zeros_like(rewards), 0
+        for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
+            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
 
         n_step_rewards = np.zeros_like(rewards)
-        gamma_map = [self.gamma ** i for i in range(self.n_steps)]
         for index in range(len(rewards)):
-            next_done = np.where(terminals[index:min(len(rewards), index+self.n_steps)] == 1)[0]
-            n_step_rollout = rewards[index:min(len(rewards), index+self.n_steps)]
+            n_step_rollout = discounted_rewards[index:(min(len(rewards), index+self.n_steps))]
+            next_done = np.where(terminals[index:min(len(rewards), index + self.n_steps)] == 1)[0]
 
             if len(next_done) != 0:
                 n_step_rollout = n_step_rollout[:next_done[0]+1]
-
-            n_step_rewards[index] = (gamma_map[:len(n_step_rollout)] * n_step_rollout).sum()
-            n_step_rewards[index] += (self.gamma ** len(n_step_rollout)) * q_target[index]
-        rewards = (n_step_rewards - n_step_rewards.mean()) / (n_step_rewards.std() + 1e-5)
-        rewards = T.tensor(rewards).float()
+            n_step_rewards[index] = n_step_rollout.sum() + (self.gamma ** len(n_step_rollout) * q_target[index])
+        n_step_rewards = (n_step_rewards - n_step_rewards.mean()) / (n_step_rewards.std() + 1e-5)
+        rewards = T.tensor(n_step_rewards).float()
 
         q_target = rewards
         return q_eval, q_target
@@ -178,6 +178,6 @@ if __name__ == '__main__':
     env = gym.make('CartPole-v1')
     # env = gym.make('LunarLander-v2')
     agent = Agent(1.0, 0.99, env.observation_space.shape, [env.action_space.n],
-                  n_steps=15)
+                  n_steps=1)
 
-    learn(env, agent, 500)
+    learn(env, agent, 1000)
