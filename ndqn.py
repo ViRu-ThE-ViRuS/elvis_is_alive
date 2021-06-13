@@ -53,17 +53,17 @@ class DeepQN(nn.Module):
 
 
 class Agent:
-    def __init__(self, epsilon, gamma, input_shape, output_shape):
+    def __init__(self, epsilon, gamma, input_shape, output_shape, n_steps=4):
         self.epsilon = epsilon
         self.gamma = gamma
         self.output_shape = output_shape
-        self.n_step = 16
+        self.n_steps = n_steps
 
         self.q_eval = DeepQN(input_shape, output_shape, [64, 64])
         self.q_target = DeepQN(input_shape, output_shape, [64, 64])
-        self.memory = TransitionMemory(self.n_step)
+        self.memory = TransitionMemory(self.n_steps)
 
-        self.tau = 8
+        self.tau = 4
         self.learn_step = 0
 
         self.update()
@@ -88,13 +88,25 @@ class Agent:
         q_eval = self._evaluate(states, actions)
         q_target = self._evaluate(states_)
 
-        discounted_rewards, R = np.zeros_like(rewards), 0
-        for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
-            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
-        discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
-        rewards = T.tensor(discounted_rewards).float()
+        terminals = np.array(terminals)
+        rewards = np.array(rewards)
 
-        return rewards, q_eval, q_target
+        n_step_rewards = np.zeros_like(rewards)
+        gamma_map = [self.gamma ** i for i in range(self.n_steps)]
+        for index in range(len(rewards)):
+            next_done = np.where(terminals[index:min(len(rewards), index+self.n_steps)] == 1)[0]
+            n_step_rollout = rewards[index:min(len(rewards), index+self.n_steps)]
+
+            if len(next_done) != 0:
+                n_step_rollout = n_step_rollout[:next_done[0]+1]
+
+            n_step_rewards[index] = (gamma_map[:len(n_step_rollout)] * n_step_rollout).sum()
+            n_step_rewards[index] += (self.gamma ** len(n_step_rollout)) * q_target[index]
+        rewards = (n_step_rewards - n_step_rewards.mean()) / (n_step_rewards.std() + 1e-5)
+        rewards = T.tensor(rewards).float()
+
+        q_target = rewards
+        return q_eval, q_target
 
     def _evaluate(self, states, actions=None):
         if actions:
@@ -107,13 +119,11 @@ class Agent:
         self.learn_step += 1
         self.memory.store((action, state, state_, reward, done))
 
-        if self.learn_step % self.n_step:
+        if self.learn_step % self.n_steps:
             return
 
         self.q_eval.train()
-        rewards, q_eval, q_target = self.evaluate()
-        q_target = rewards + (self.gamma ** self.n_step) * q_target
-
+        q_eval, q_target = self.evaluate()
         loss = self.q_eval.learn(q_eval, q_target)
         self.epsilon *= 0.95 if self.epsilon > 0.1 else 1.0
 
@@ -167,6 +177,7 @@ def learn(env, agent, episodes=500):
 if __name__ == '__main__':
     env = gym.make('CartPole-v1')
     # env = gym.make('LunarLander-v2')
-    agent = Agent(1.0, 0.9, env.observation_space.shape, [env.action_space.n])
+    agent = Agent(1.0, 0.99, env.observation_space.shape, [env.action_space.n],
+                  n_steps=15)
 
-    learn(env, agent, 2000)
+    learn(env, agent, 500)
