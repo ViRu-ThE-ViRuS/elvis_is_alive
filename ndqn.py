@@ -84,24 +84,25 @@ class Agent:
 
     def evaluate(self):
         (actions, states, states_, rewards, terminals) = self.memory.get_all(clear=True)
+        rewards, terminals = np.array(rewards), np.array(terminals)
 
         q_eval = self._evaluate(states, actions)
         q_target = self._evaluate(states_).detach()
 
-        rewards, terminals = np.array(rewards), np.array(terminals)
-
-        discounted_rewards, R = np.zeros_like(rewards), 0
+        n_step_rewards, discounted_rewards, R = np.zeros_like(rewards), np.zeros_like(rewards), 0
         for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
-            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
+            inverse_index = len(rewards) - index - 1
+            discounted_rewards[inverse_index] = R = reward + self.gamma * R * (1 - done)
 
-        n_step_rewards = np.zeros_like(rewards)
-        for index in range(len(rewards)):
-            n_step_rollout = discounted_rewards[index:(min(len(rewards), index+self.n_steps))]
-            next_done = np.where(terminals[index:min(len(rewards), index + self.n_steps)] == 1)[0]
+            if done or self.n_steps == 1:
+                reward_rollout = discounted_rewards[inverse_index]
+            else:
+                reward_rollout = discounted_rewards[inverse_index:min(len(rewards), inverse_index+self.n_steps)].sum() - \
+                    discounted_rewards[min(len(rewards), inverse_index+self.n_steps)-1]
 
-            if len(next_done) != 0:
-                n_step_rollout = n_step_rollout[:next_done[0]+1]
-            n_step_rewards[index] = n_step_rollout.sum() + (self.gamma ** len(n_step_rollout) * q_target[index])
+            n_step_rewards[inverse_index] = reward_rollout + 0 * (self.gamma ** self.n_steps) * \
+                q_target[inverse_index]
+
         n_step_rewards = (n_step_rewards - n_step_rewards.mean()) / (n_step_rewards.std() + 1e-5)
         rewards = T.tensor(n_step_rewards).float()
 
@@ -115,10 +116,11 @@ class Agent:
         else:
             return self.q_target(T.tensor(states).float()).detach().max(axis=1)[0]
 
-    def learn(self, state, action, state_, reward, done):
-        self.learn_step += 1
+    def store(self, state, action, state_, reward, done):
         self.memory.store((action, state, state_, reward, done))
 
+    def learn(self):
+        self.learn_step += 1
         if self.learn_step % self.n_steps:
             return
 
@@ -150,17 +152,18 @@ def learn(env, agent, episodes=500):
         while not done:
             action = agent.move(state)
             state_, reward, done, _ = env.step(action)
-            loss = agent.learn(state, action, state_, reward, done)
+            agent.store(state, action, state_, reward, done)
 
             state = state_
             total_reward += reward
             n_steps += 1
 
-            if loss:
-                losses.append(loss)
-
         rewards.append(total_reward)
         steps.append(n_steps)
+
+        loss = agent.learn()
+        if loss:
+            losses.append(loss)
 
         if episode % (episodes // 10) == 0 and episode != 0:
             print(f'{episode:5d} : {np.mean(rewards):06.2f} '
