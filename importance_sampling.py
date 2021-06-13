@@ -112,8 +112,8 @@ class Agent(object):
 
             loss_is = ((-log_probs * (rewards - baseline)) / importance_sampling).sum() / importance_sampling.sum()
             loss_entropy = (-0.0001 * dist_entropy).mean()
-
             loss = loss_is + loss_entropy
+
             losses.append(loss.item())
 
             # visualize
@@ -176,6 +176,6 @@ if __name__ == '__main__':
     env = gym.make('CartPole-v1')
     # env = gym.make('LunarLander-v2')
     agent = Agent(0.9, env.observation_space.shape, [env.action_space.n],
-                  update_interval=200, K=1)
+                  update_interval=100, K=2)
 
     learn(env, agent, 1000)
