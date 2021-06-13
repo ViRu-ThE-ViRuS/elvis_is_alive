@@ -70,6 +70,8 @@ class Agent(object):
         self.lr = lr
         self.update()
 
+        self.learn_step = 0
+
     def update(self):
         self.policy_old.load_state_dict(self.policy.state_dict())
         self.policy_old.eval()
@@ -85,27 +87,26 @@ class Agent(object):
     def evaluate(self, clear=True):
         actions, states, states_, rewards, terminals = self.memory.get_all(clear=clear)
         log_probs, state_values, state_values_, dist_entropy = self._evaluate(states, states_, actions)
-        state_values_ = state_values_.detach()
-
         rewards, terminals = np.array(rewards), np.array(terminals)
 
-        discounted_rewards, R = np.zeros_like(rewards), 0
+        n_step_rewards, discounted_rewards, R = np.zeros_like(rewards), np.zeros_like(rewards), 0
         for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
-            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
+            inverse_index = len(rewards) - index - 1
+            discounted_rewards[inverse_index] = R = reward + self.gamma * R * (1 - done)
 
-        n_step_rewards = np.zeros_like(rewards)
-        for index in range(len(rewards)):
-            n_step_rollout = discounted_rewards[index:(min(len(rewards), index+self.n_steps))]
-            next_done = np.where(terminals[index:min(len(rewards), index + self.n_steps)] == 1)[0]
+            if done or self.n_steps == 1:
+                reward_rollout = discounted_rewards[inverse_index]
+            else:
+                reward_rollout = discounted_rewards[inverse_index:min(len(rewards), inverse_index+self.n_steps)].sum() - \
+                    discounted_rewards[min(len(rewards), inverse_index+self.n_steps)-1]
 
-            if len(next_done) != 0:
-                n_step_rollout = n_step_rollout[:next_done[0]+1]
-            n_step_rewards[index] = n_step_rollout.sum() + (self.gamma ** self.n_steps * state_values_[index])
+            n_step_rewards[inverse_index] = reward_rollout + (self.gamma ** self.n_steps) * \
+                state_values_[inverse_index]
 
         rewards = (n_step_rewards - n_step_rewards.mean()) / (n_step_rewards.std() + 1e-5)
         rewards = T.tensor(rewards).float()
 
-        return log_probs, rewards, state_values, state_values_, dist_entropy
+        return log_probs, rewards, state_values,  dist_entropy
 
     def _evaluate(self, states, states_, actions):
         states = T.tensor(states).float()
@@ -122,8 +123,12 @@ class Agent(object):
         return log_probs, T.squeeze(state_values), T.squeeze(state_values_), dist_entropy
 
     def learn(self):
+        self.learn_step += 1
+        if self.learn_step % self.n_steps and self.learn_step:
+            return
+
         self.policy.train()
-        log_probs, rewards, state_values, state_values_, dist_entropy = self.evaluate()
+        log_probs, rewards, state_values, dist_entropy = self.evaluate()
         advantage = rewards - state_values
 
         actor_loss = -log_probs * advantage.detach()
@@ -166,10 +171,16 @@ def learn(env, agent, episodes=500):
             total_reward += reward
             n_steps += 1
 
-        loss = agent.learn()
-        losses.append(loss)
+            # if n_steps % agent.n_steps == 0:
+            #     loss = agent.learn()
+            #     losses.append(loss)
+
         rewards.append(total_reward)
         steps.append(n_steps)
+
+        loss = agent.learn()
+        if loss:
+            losses.append(loss)
 
         if episode % (episodes // 10) == 0 and episode != 0:
             print(f'{episode:5d} : {np.mean(rewards):06.2f} '
@@ -187,6 +198,6 @@ if __name__ == '__main__':
     env = gym.make('CartPole-v1')
     # env = gym.make('LunarLander-v2')
     agent = Agent(0.99, env.observation_space.shape, [env.action_space.n],
-                  n_steps=10, entropy_coeff=0.001, critic_coeff=0.5, lr=0.001)
+                  n_steps=4, entropy_coeff=0.001, critic_coeff=0.5, lr=0.001)
 
     learn(env, agent, 1000)
