@@ -7,6 +7,7 @@ from torchviz import make_dot
 import numpy as np
 import gym
 from collections import deque
+import time
 
 
 class SharedAdam(T.optim.Adam):
@@ -25,8 +26,8 @@ class SharedAdam(T.optim.Adam):
 
 
 class TransitionBuffer:
-    def __init__(self):
-        self.buffer = deque()
+    def __init__(self, maxlen=1000):
+        self.buffer = deque(maxlen=maxlen)
 
     def get_all(self, clear=True):
         transitions = map(list, zip(*self.buffer))
@@ -63,23 +64,33 @@ class ActorCriticNetwork(nn.Module):
 
 
 class Agent(object):
-    def __init__(self, gamma, env_name, max_episodes=500):
+    def __init__(self, gamma, env_name, max_episodes=500, total_cpu=4):
         self.env_name = env_name
         self.gamma = gamma
 
+        self.cpu_count_test = 1
+        self.cpu_count_train = total_cpu - 1
+        self.max_episodes_train = max_episodes * total_cpu
+        self.max_episodes_test = max_episodes
+
+        self.train_episode, self.test_episode, self.result_queue = mp.Value('i', 0), mp.Value('i', 0),  mp.Queue()
+
         env = gym.make(env_name)
-        self.actor_critic = ActorCriticNetwork(env.observation_space.shape, [env.action_space.n], [128])
-        self.actor_critic.share_memory()
+        self.global_model = ActorCriticNetwork(env.observation_space.shape, [env.action_space.n], [128])
+        self.global_model.share_memory()
+        self.optimizer = SharedAdam(self.global_model.parameters(), lr=0.001)
 
-        self.optimizer = SharedAdam(self.actor_critic.parameters(), lr=0.001)
+        self.trainers = [LocalTrainer(self.gamma, self.env_name, self.max_episodes_train,
+                                      self.global_model, self.optimizer,
+                                      self.train_episode, self.result_queue, i)
+                         for i in range(self.cpu_count_train)]
 
-        self.episode, self.reward, self.result_queue = mp.Value('i', 0), mp.Value('d', 0), mp.Queue()
-        self.workers = [LocalAgent(gamma, env_name, max_episodes,
-                                   self.actor_critic, self.optimizer, self.episode, self.reward, self.result_queue, i)
-                        for i in range(mp.cpu_count())]
+        self.testers = [LocalTester(self.env_name, self.max_episodes_test,
+                                    self.global_model, self.test_episode, self.result_queue, 0)]
 
-    def train(self):
-        [worker.start() for worker in self.workers]
+    def run(self):
+        [trainer.start() for trainer in self.trainers]
+        [tester.start() for tester in self.testers]
 
         results = []
         while True:
@@ -89,30 +100,78 @@ class Agent(object):
             except Exception:
                 break
 
-        [worker.join() for worker in self.workers]
+        [trainer.join() for trainer in self.trainers]
+        [tester.join() for tester in self.testers]
         return results
 
 
-class LocalAgent(mp.Process):
+class LocalTester(mp.Process):
+    def __init__(self, env_name, max_episodes,
+                 model, global_episodes, global_result_queue, name):
+        super(LocalTester, self).__init__()
+
+        self.global_model = model
+        self.global_episodes = global_episodes
+        self.global_result_queue = global_result_queue
+        self.max_episodes = max_episodes
+        self.name = 'Tester#' + str(name)
+
+        self.env = gym.make(env_name)
+
+    def run(self):
+        while self.global_episodes.value < self.max_episodes:
+            done = False
+            state = self.env.reset()
+            total_reward = 0
+            n_steps = 0
+
+            while not done:
+                action = self.move(state)
+                state_, reward, done, _ = self.env.step(action)
+
+                state = state_
+                total_reward += reward
+                n_steps += 1
+
+            self.record(total_reward, n_steps)
+
+    def move(self, state):
+        self.global_model.eval()
+        action_probs, _ = self.global_model(T.tensor(state, dtype=T.float))
+        action = T.distributions.Categorical(action_probs).sample()
+        return action.item()
+
+    def record(self, total_reward, steps):
+        with self.global_episodes.get_lock():
+            self.global_episodes.value += 1
+
+        self.global_result_queue.put(total_reward)
+        if self.global_episodes.value % (self.max_episodes // 10) == 0:
+            print(f'{self.name}: {self.global_episodes.value:5d} : {total_reward:06.2f} : {steps:06.2f}')
+            time.sleep(2.5)
+
+
+class LocalTrainer(mp.Process):
     def __init__(self, gamma, env_name, max_episodes,
-                 model, optimizer, global_episodes, global_rewards, global_result_queue, name):
-        super(LocalAgent, self).__init__()
+                 model, optimizer, global_episodes, global_result_queue, name):
+        super(LocalTrainer, self).__init__()
 
         self.global_model = model
         self.global_optimizer = optimizer
         self.global_episodes = global_episodes
-        self.global_rewards = global_rewards
         self.global_result_queue = global_result_queue
         self.max_episodes = max_episodes
-        self.name = str(name)
+        self.name = 'Trainer#' + str(name)
 
         self.gamma = gamma
         self.env = gym.make(env_name)
         self.memory = TransitionBuffer()
 
         self.actor_critic = ActorCriticNetwork(self.env.observation_space.shape, [self.env.action_space.n], [128])
-
         self.sync()
+
+    def sync(self):
+        self.actor_critic.load_state_dict(self.global_model.state_dict())
 
     def run(self):
         while self.global_episodes.value < self.max_episodes:
@@ -133,9 +192,6 @@ class LocalAgent(mp.Process):
             loss = self.push_grads()
             self.record(total_reward, n_steps, loss)
 
-    def sync(self):
-        self.actor_critic.load_state_dict(self.global_model.state_dict())
-
     def push_grads(self):
         loss = self.calculate_loss()
 
@@ -155,39 +211,42 @@ class LocalAgent(mp.Process):
         with self.global_episodes.get_lock():
             self.global_episodes.value += 1
 
-        with self.global_rewards.get_lock():
-            self.global_rewards.value = total_reward
-
         self.global_result_queue.put(total_reward)
         if self.global_episodes.value % (self.max_episodes // 10) == 0:
-            print(f'{self.global_episodes.value:5d} : {total_reward:06.2f} '
-                  f': {loss:06.4f} : {steps:06.2f}')
+            # print(f'{self.global_episodes.value:5d} : {total_reward:06.2f} '
+            #       f': {loss:06.4f} : {steps:06.2f}')
+            pass
 
     def store(self, transition):
         self.memory.store(transition)
 
     def evaluate(self, clear=True):
         actions, states, states_, rewards, terminals = self.memory.get_all(clear=clear)
-        log_probs, state_values, dist_entropy = self._evaluate(states, actions)
+        log_probs, state_values, state_values_, dist_entropy = self._evaluate(states, states_, actions)
 
-        discounted_rewards, R = np.zeros_like(rewards), 0
+        discounted_rewards, R = np.zeros_like(rewards), 0 if terminals[-1] else state_values[-1].item()
         for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
             discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
-        discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
         rewards = T.tensor(discounted_rewards).float()
 
-        return log_probs, rewards, state_values, dist_entropy
+        rewards = rewards + self.gamma * state_values_
+        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
 
-    def _evaluate(self, state, action):
-        state = T.tensor(state).float()
-        action = T.tensor(action).float()
+        return log_probs, rewards.detach(), state_values, dist_entropy
 
-        action_probs, state_value = self.actor_critic(state)
+    def _evaluate(self, states, states_, actions):
+        states = T.tensor(states).float()
+        states_ = T.tensor(states_).float()
+        actions = T.tensor(actions).float()
+
+        action_probs, state_values = self.actor_critic(states)
         dist = T.distributions.Categorical(action_probs)
 
-        log_prob = dist.log_prob(action)
+        log_probs = dist.log_prob(actions)
         dist_entropy = dist.entropy()
-        return log_prob, T.squeeze(state_value), dist_entropy
+
+        _, state_values_ = self.global_model(states_)
+        return log_probs, T.squeeze(state_values), T.squeeze(state_values_.detach()), dist_entropy
 
     def move(self, state):
         self.actor_critic.eval()
@@ -198,7 +257,7 @@ class LocalAgent(mp.Process):
     def calculate_loss(self):
         self.actor_critic.train()
 
-        log_probs, rewards, state_values, dist_entropy = self.evaluate(clear=True)
+        log_probs, rewards, state_values, dist_entropy = self.evaluate()
         advantage = rewards - state_values
 
         actor_loss = -log_probs * advantage.detach()
@@ -213,5 +272,5 @@ class LocalAgent(mp.Process):
 
 
 if __name__ == '__main__':
-    agent = Agent(0.9, 'CartPole-v1', 500 * mp.cpu_count())
-    agent.train()
+    agent = Agent(0.9, 'CartPole-v1', 300, mp.cpu_count())
+    agent.run()
