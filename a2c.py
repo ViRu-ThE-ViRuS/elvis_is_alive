@@ -25,7 +25,7 @@ class TransitionMemory:
 
 
 class ActorCriticNetwork(nn.Module):
-    def __init__(self, input_shape, output_shape, hidden_layer_dims):
+    def __init__(self, input_shape, output_shape, hidden_layer_dims, lr=0.001):
         super(ActorCriticNetwork, self).__init__()
 
         layers = []
@@ -43,7 +43,7 @@ class ActorCriticNetwork(nn.Module):
         T.nn.init.orthogonal_(self.critic.weight.data)
 
         self.layers = nn.ModuleList(layers)
-        self.optimizer = T.optim.Adam(self.parameters(), lr=0.005)
+        self.optimizer = T.optim.Adam(self.parameters(), lr=lr)
 
     def forward(self, states):
         for layer in self.layers:
@@ -55,14 +55,27 @@ class ActorCriticNetwork(nn.Module):
 
 
 class Agent(object):
-    def __init__(self, gamma, input_shape, output_shape):
+    def __init__(self, gamma, input_shape, output_shape,
+                 n_steps=5, critic_coeff=0.5, entropy_coeff=0.02, max_grad_norm=0.5,
+                 lr=0.001):
         self.gamma = gamma
-        self.actor_critic = ActorCriticNetwork(input_shape, output_shape, [64, 64])
+        self.policy = ActorCriticNetwork(input_shape, output_shape, [64, 64], lr=lr)
+        self.policy_old = ActorCriticNetwork(input_shape, output_shape, [64, 64])
         self.memory = TransitionMemory(1000)
 
+        self.n_steps = n_steps
+        self.critic_coeff = critic_coeff
+        self.entropy_coeff = entropy_coeff
+        self.max_grad_norm = max_grad_norm
+        self.lr = lr
+        self.update()
+
+    def update(self):
+        self.policy_old.load_state_dict(self.policy.state_dict())
+        self.policy_old.eval()
+
     def move(self, state):
-        self.actor_critic.eval()
-        action_probs, _ = self.actor_critic(T.tensor(state, dtype=T.float))
+        action_probs, _ = self.policy_old(T.tensor(state, dtype=T.float))
         action = T.distributions.Categorical(action_probs).sample()
         return action.item()
 
@@ -71,45 +84,54 @@ class Agent(object):
 
     def evaluate(self, clear=True):
         actions, states, states_, rewards, terminals = self.memory.get_all(clear=clear)
-        log_probs, state_values, dist_entropy = self._evaluate(states, actions)
+        log_probs, state_values, state_values_, dist_entropy = self._evaluate(states, states_, actions)
+        state_values_ = state_values_.detach()
 
-        discounted_rewards, R = np.zeros_like(rewards), 0
-        for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
-            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R * (1 - done)
-        discounted_rewards = (discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5)
-        rewards = T.tensor(discounted_rewards).float()
+        n_step_rewards = np.zeros_like(rewards)
+        gamma_map = [self.gamma ** i for i in range(self.n_steps)]
+        for index in range(len(rewards)):
+            n_step_rollout = rewards[index:min(len(rewards), index+self.n_steps)]
+            n_step_rewards[index] = (gamma_map[:len(n_step_rollout)] * np.array(n_step_rollout)).sum()
+            n_step_rewards[index] += (self.gamma ** (len(n_step_rollout) + 1)) * state_values_[index]
+        rewards = (n_step_rewards - n_step_rewards.mean()) / (n_step_rewards.std() + 1e-5)
+        rewards = T.tensor(rewards).float()
 
-        return log_probs, rewards, state_values, dist_entropy
+        return log_probs, rewards, state_values, state_values_, dist_entropy
 
-    def _evaluate(self, state, action):
-        state = T.tensor(state).float()
-        action = T.tensor(action).float()
+    def _evaluate(self, states, states_, actions):
+        states = T.tensor(states).float()
+        states_ = T.tensor(states_).float()
+        actions = T.tensor(actions).float()
 
-        action_probs, state_value = self.actor_critic(state)
+        self.policy.eval()
+        action_probs, state_values = self.policy(states)
+        _, state_values_ = self.policy(states_)
+
         dist = T.distributions.Categorical(action_probs)
-
-        log_prob = dist.log_prob(action)
+        log_probs = dist.log_prob(actions)
         dist_entropy = dist.entropy()
-        return log_prob, T.squeeze(state_value), dist_entropy
+        return log_probs, T.squeeze(state_values), T.squeeze(state_values_), dist_entropy
 
     def learn(self):
-        self.actor_critic.train()
-
-        log_probs, rewards, state_values, dist_entropy = self.evaluate(clear=True)
+        self.policy.train()
+        log_probs, rewards, state_values, state_values_, dist_entropy = self.evaluate()
         advantage = rewards - state_values
 
         actor_loss = -log_probs * advantage.detach()
-        critic_loss = advantage ** 2
-        entropy_loss = -dist_entropy * 0.001
+        critic_loss = self.critic_coeff * advantage ** 2
+        entropy_loss = -self.entropy_coeff * dist_entropy
         loss = (actor_loss + critic_loss + entropy_loss).mean()
 
-        self.actor_critic.optimizer.zero_grad()
+        self.policy.optimizer.zero_grad()
         loss.backward()
-        self.actor_critic.optimizer.step()
+        T.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=self.max_grad_norm)
+        self.policy.optimizer.step()
 
         # visualize
-        # make_dot(loss, params=dict(self.actor_critic.named_parameters())).render("attached")
+        # make_dot(loss, params=dict(self.policy.named_parameters())).render("attached")
+        # raise SystemError
 
+        self.update()
         return loss.item()
 
 
@@ -155,6 +177,7 @@ def learn(env, agent, episodes=500):
 if __name__ == '__main__':
     env = gym.make('CartPole-v1')
     # env = gym.make('LunarLander-v2')
-    agent = Agent(0.9, env.observation_space.shape, [env.action_space.n])
+    agent = Agent(0.99, env.observation_space.shape, [env.action_space.n],
+                  n_steps=5, entropy_coeff=0.001, critic_coeff=0.5, lr=0.001)
 
     learn(env, agent, 500)
