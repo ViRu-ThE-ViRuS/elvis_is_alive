@@ -67,6 +67,9 @@ class DeepQN(nn.Module):
         self.layers = nn.ModuleList(layers)
         self.optimizer = T.optim.Adam(self.parameters(), lr=0.001)
 
+        self.scheduler = T.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode='max', factor=0.9, patience=0, verbose=False)
+
     def forward(self, states):
         for layer in self.layers[:-1]:
             states = F.relu(layer(states))
@@ -114,6 +117,9 @@ class Agent:
         if self.learn_step % self.tau == 0:
             self.q_target.load_state_dict(self.q_eval.state_dict())
             self.q_target.eval()
+
+            # if self.learn_step != 0:
+            #     self.q_eval.scheduler.step()
 
     def sample(self):
         (actions, states, states_, rewards, terminals), importance, indices = \
@@ -182,6 +188,9 @@ def learn(env, agent, episodes=500):
         rewards.append(total_reward)
         steps.append(n_steps)
 
+        if episode > (num_episodes // 2):
+            agent.q_eval.scheduler.step(np.mean(rewards))
+
         if episode % (episodes // 10) == 0 and episode != 0:
             print(f'{episode:5d} : {np.mean(rewards):06.2f} '
                   f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
@@ -195,8 +204,8 @@ def learn(env, agent, episodes=500):
 
 
 if __name__ == '__main__':
-    env = gym.make('CartPole-v1')
+    env = gym.make('LunarLander-v2')
     # env = gym.make('LunarLander-v2')
     agent = Agent(1.0, 0.9, env.observation_space.shape, [env.action_space.n])
 
-    learn(env, agent, 500)
+    learn(env, agent, 100)
