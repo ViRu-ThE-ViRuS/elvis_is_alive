@@ -48,7 +48,7 @@ class ActorCriticNetwork(nn.Module):
     def forward(self, states):
         for layer in self.layers:
             states = F.relu(layer(states))
-        pi = F.softmax(self.actor(states), dim=0)
+        pi = F.softmax(self.actor(states), dim=-1)
         v = self.critic(states)
 
         return pi, v

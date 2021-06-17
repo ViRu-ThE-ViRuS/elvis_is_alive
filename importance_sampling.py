@@ -39,7 +39,7 @@ class PolicyNetwork(nn.Module):
     def forward(self, states):
         for layer in self.layers[:-1]:
             states = F.relu(layer(states))
-        return F.softmax(self.layers[-1](states), dim=0)
+        return F.softmax(self.layers[-1](states), dim=-1)
 
     def evaluate(self, states, actions):
         action_probs = self.forward(states)
