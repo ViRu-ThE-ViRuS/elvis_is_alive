@@ -8,13 +8,17 @@ import gym
 from collections import deque
 
 
+T.manual_seed(0)
+np.random.seed(0)
+
+
 class TransitionMemory:
     def __init__(self, mem_size):
         self.mem_size = mem_size
         self.buffer = deque(maxlen=mem_size)
 
     def get_all(self, clear=True):
-        transitions = map(list, zip(*self.buffer))
+        transitions = map(np.array, zip(*self.buffer))
         if clear:
             self.buffer.clear()
 
@@ -35,105 +39,101 @@ class ActorCriticNetwork(nn.Module):
 
         for layer in layers:
             T.nn.init.orthogonal_(layer.weight.data)
+            T.nn.init.zeros_(layer.bias.data)
 
         self.actor = nn.Linear(hidden_layer_dims[-1], *output_shape)
         self.critic = nn.Linear(hidden_layer_dims[-1], 1)
 
         T.nn.init.orthogonal_(self.actor.weight.data)
         T.nn.init.orthogonal_(self.critic.weight.data)
+        T.nn.init.zeros_(self.actor.bias.data)
+        T.nn.init.zeros_(self.critic.bias.data)
 
         self.layers = nn.ModuleList(layers)
         self.optimizer = T.optim.Adam(self.parameters(), lr=lr)
 
     def forward(self, states):
         for layer in self.layers:
-            states = F.relu(layer(states))
-        pi = F.softmax(self.actor(states), dim=-1)
-        v = self.critic(states)
+            states = T.relu(layer(states))
+        action_probs = F.softmax(self.actor(states), dim=-1)
+        state_values = self.critic(states)
 
-        return pi, v
+        return action_probs, state_values
+
+    def move(self, state):
+        action_probs, _ = self.forward(T.tensor(state).float())
+        action = T.distributions.Categorical(action_probs).sample()
+        return action.item()
+
+    def evaluate_actions(self, states, actions=None):
+        action_probs, state_values = self.forward(T.tensor(states).float())
+
+        if actions is None:
+            return state_values, None, None
+
+        dist = T.distributions.Categorical(action_probs)
+        log_probs = dist.log_prob(T.tensor(actions).long())
+        dist_entropy = dist.entropy()
+        return state_values, log_probs, dist_entropy
 
 
 class Agent(object):
     def __init__(self, gamma, input_shape, output_shape,
                  n_steps=5, critic_coeff=0.5, entropy_coeff=0.02, max_grad_norm=0.5,
-                 lr=0.001):
+                 lr=0.001, gae_lambda=1.0, advantage_scaling=False, reward_scale=1,
+                 network_params=[64]):
         self.gamma = gamma
-        self.policy = ActorCriticNetwork(input_shape, output_shape, [64, 64], lr=lr)
-        self.policy_old = ActorCriticNetwork(input_shape, output_shape, [64, 64])
-        self.memory = TransitionMemory(1000)
 
         self.n_steps = n_steps
         self.critic_coeff = critic_coeff
         self.entropy_coeff = entropy_coeff
         self.max_grad_norm = max_grad_norm
         self.lr = lr
-        self.update()
+        self.gae_lambda = gae_lambda
+        self.advantage_scaling = advantage_scaling
+        self.reward_scale = reward_scale
 
-        self.learn_step = 0
-
-    def update(self):
-        self.policy_old.load_state_dict(self.policy.state_dict())
-        self.policy_old.eval()
+        self.network_params = network_params
+        self.policy = ActorCriticNetwork(input_shape, output_shape, network_params, lr=lr)
+        self.memory = TransitionMemory(n_steps)
 
     def move(self, state):
-        action_probs, _ = self.policy_old(T.tensor(state, dtype=T.float))
-        action = T.distributions.Categorical(action_probs).sample()
-        return action.item()
+        self.policy.eval()
+        return self.policy.move(state)
 
     def store(self, transition):
         self.memory.store(transition)
 
-    def evaluate(self, clear=True):
-        actions, states, states_, rewards, terminals = self.memory.get_all(clear=clear)
-        log_probs, state_values, state_values_, dist_entropy = self._evaluate(states, states_, actions)
-        rewards, terminals = np.array(rewards), np.array(terminals)
+    def calculate_advantages(self, states_, state_values, rewards, terminals):
+        with T.no_grad():
+            state_values = state_values.numpy().flatten()
+            state_values_ = self.policy.evaluate_actions(states_)[0].numpy().flatten()
 
-        n_step_rewards, discounted_rewards, R = np.zeros_like(rewards), np.zeros_like(rewards), 0
-        for index, (reward, done) in enumerate(zip(rewards[::-1], terminals[::-1])):
+        lambda_return, advantages = 0.0, np.zeros_like(rewards)
+        for index, (reward, terminal) in enumerate(zip(rewards[::-1], terminals[::-1])):
             inverse_index = len(rewards) - index - 1
-            discounted_rewards[inverse_index] = R = reward + self.gamma * R * (1 - done)
+            delta = reward + self.gamma * state_values_[inverse_index] * (1 - terminal) - state_values[inverse_index]
+            lambda_return = delta + self.gamma * self.gae_lambda * (1 - terminal) * lambda_return
+            advantages[inverse_index] = lambda_return
 
-            if done or self.n_steps == 1:
-                reward_rollout = discounted_rewards[inverse_index]
-            else:
-                reward_rollout = discounted_rewards[inverse_index:min(len(rewards), inverse_index+self.n_steps)].sum() - \
-                    discounted_rewards[min(len(rewards), inverse_index+self.n_steps)-1]
+        rollout_rewards = advantages + state_values
 
-            n_step_rewards[inverse_index] = reward_rollout + (self.gamma ** self.n_steps) * \
-                state_values_[inverse_index]
+        if self.advantage_scaling:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
 
-        rewards = (n_step_rewards - n_step_rewards.mean()) / (n_step_rewards.std() + 1e-5)
-        rewards = T.tensor(rewards).float()
-
-        return log_probs, rewards, state_values,  dist_entropy
-
-    def _evaluate(self, states, states_, actions):
-        states = T.tensor(states).float()
-        states_ = T.tensor(states_).float()
-        actions = T.tensor(actions).float()
-
-        self.policy.eval()
-        action_probs, state_values = self.policy(states)
-        _, state_values_ = self.policy_old(states_)
-
-        dist = T.distributions.Categorical(action_probs)
-        log_probs = dist.log_prob(actions)
-        dist_entropy = dist.entropy()
-        return log_probs, T.squeeze(state_values), T.squeeze(state_values_), dist_entropy
+        return T.tensor(rollout_rewards).float(), T.tensor(advantages).float()
 
     def learn(self):
-        self.learn_step += 1
-        if self.learn_step % self.n_steps and self.learn_step:
-            return
-
         self.policy.train()
-        log_probs, rewards, state_values, dist_entropy = self.evaluate()
-        advantage = rewards - state_values
 
-        actor_loss = -log_probs * advantage.detach()
-        critic_loss = self.critic_coeff * advantage ** 2
-        entropy_loss = -self.entropy_coeff * dist_entropy
+        actions, states, states_, rewards, terminals = self.memory.get_all(clear=True)
+        state_values, log_probs, dist_entropy = self.policy.evaluate_actions(states, actions)
+        rollout_rewards, advantages = self.calculate_advantages(states_, state_values, rewards, terminals)
+
+        actor_loss = - log_probs * advantages
+        critic_loss = self.critic_coeff * (rollout_rewards - state_values.flatten()) ** 2
+        entropy_loss = - self.entropy_coeff * dist_entropy
+
         loss = (actor_loss + critic_loss + entropy_loss).mean()
 
         self.policy.optimizer.zero_grad()
@@ -145,7 +145,6 @@ class Agent(object):
         # make_dot(loss, params=dict(self.policy.named_parameters())).render("attached")
         # raise SystemError
 
-        self.update()
         return loss.item()
 
 
@@ -163,24 +162,23 @@ def learn(env, agent, episodes=500):
         n_steps = 0
 
         while not done:
-            action = agent.move(state)
-            state_, reward, done, _ = env.step(action)
-            agent.store((action, state, state_, reward, done))
+            for _ in range(agent.n_steps):
+                action = agent.move(state)
+                state_, reward, done, _ = env.step(action)
+                agent.store((action, state, state_, reward, done))
 
-            state = state_
-            total_reward += reward
-            n_steps += 1
+                state = state_
+                total_reward += reward
+                n_steps += 1
 
-            # if n_steps % agent.n_steps == 0:
-            #     loss = agent.learn()
-            #     losses.append(loss)
+                if done:
+                    break
+
+            loss = agent.learn()
+            losses.append(loss)
 
         rewards.append(total_reward)
         steps.append(n_steps)
-
-        loss = agent.learn()
-        if loss:
-            losses.append(loss)
 
         if episode % (episodes // 10) == 0 and episode != 0:
             print(f'{episode:5d} : {np.mean(rewards):06.2f} '
@@ -195,9 +193,10 @@ def learn(env, agent, episodes=500):
 
 
 if __name__ == '__main__':
-    env = gym.make('CartPole-v1')
+    env = gym.make('CartPole-v0')
     # env = gym.make('LunarLander-v2')
     agent = Agent(0.99, env.observation_space.shape, [env.action_space.n],
-                  n_steps=4, entropy_coeff=0.001, critic_coeff=0.5, lr=0.001)
+                  n_steps=5, entropy_coeff=0.000, critic_coeff=0.5, lr=0.001,
+                  gae_lambda=1.0, network_params=[64, 64])
 
     learn(env, agent, 1000)
