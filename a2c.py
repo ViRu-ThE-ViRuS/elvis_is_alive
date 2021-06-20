@@ -32,20 +32,22 @@ class ActorCriticNetwork(nn.Module):
         for index, dim in enumerate(hidden_layer_dims[1:]):
             layers.append(nn.Linear(hidden_layer_dims[index], dim))
 
-        for layer in layers:
-            T.nn.init.orthogonal_(layer.weight.data)
-            T.nn.init.zeros_(layer.bias.data)
-
         self.actor = nn.Linear(hidden_layer_dims[-1], *output_shape)
         self.critic = nn.Linear(hidden_layer_dims[-1], 1)
+
+        self.layers = nn.ModuleList(layers)
+        self.optimizer = T.optim.Adam(self.parameters(), lr=lr)
+        self._init_layers()
+
+    def _init_layers(self):
+        for layer in self.layers:
+            T.nn.init.orthogonal_(layer.weight.data)
+            T.nn.init.zeros_(layer.bias.data)
 
         T.nn.init.orthogonal_(self.actor.weight.data)
         T.nn.init.orthogonal_(self.critic.weight.data)
         T.nn.init.zeros_(self.actor.bias.data)
         T.nn.init.zeros_(self.critic.bias.data)
-
-        self.layers = nn.ModuleList(layers)
-        self.optimizer = T.optim.Adam(self.parameters(), lr=lr)
 
     def forward(self, states):
         for layer in self.layers:
@@ -75,8 +77,7 @@ class ActorCriticNetwork(nn.Module):
 class Agent(object):
     def __init__(self, gamma, input_shape, output_shape,
                  n_steps=5, critic_coeff=0.5, entropy_coeff=0.02, max_grad_norm=0.5,
-                 lr=0.001, gae_lambda=1.0, advantage_scaling=False, reward_scale=1,
-                 network_params=[64]):
+                 lr=0.001, gae_lambda=1.0, advantage_scaling=False, network_params=[64]):
         self.gamma = gamma
 
         self.n_steps = n_steps
@@ -87,7 +88,6 @@ class Agent(object):
         self.lr = lr
         self.gae_lambda = gae_lambda
         self.advantage_scaling = advantage_scaling
-        self.reward_scale = reward_scale
 
         self.network_params = network_params
         self.policy = ActorCriticNetwork(input_shape, output_shape, network_params, lr=lr)

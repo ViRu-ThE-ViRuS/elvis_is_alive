@@ -35,7 +35,7 @@ class TransitionBuffer:
         self.buffer = deque(maxlen=maxlen)
 
     def get_all(self, clear=True):
-        transitions = map(list, zip(*self.buffer))
+        transitions = map(np.array, zip(*self.buffer))
         if clear:
             self.buffer.clear()
 
@@ -58,57 +58,80 @@ class ActorCriticNetwork(nn.Module):
 
         self.actor = nn.Linear(hidden_layer_dims[-1], *output_shape)
         self.critic = nn.Linear(hidden_layer_dims[-1], 1)
+
         self.layers = nn.ModuleList(layers)
+        self._init_layers()
+
+    def _init_layers(self):
+        for layer in self.layers:
+            T.nn.init.orthogonal_(layer.weight.data)
+            T.nn.init.zeros_(layer.bias.data)
+
+        T.nn.init.orthogonal_(self.actor.weight.data)
+        T.nn.init.orthogonal_(self.critic.weight.data)
+        T.nn.init.zeros_(self.actor.bias.data)
+        T.nn.init.zeros_(self.critic.bias.data)
 
     def forward(self, states):
         for layer in self.layers:
-            states = F.relu(layer(states))
-        policy = F.softmax(self.actor(states), dim=-1)
-        values = self.critic(states)
+            states = T.relu(layer(states))
+        action_probs = F.softmax(self.actor(states), dim=-1)
+        state_values = self.critic(states)
 
-        return policy, values
+        return action_probs, state_values
 
-    def move(self, states):
-        policy, _ = self.forward(T.tensor(states).float())
-        action = T.distributions.Categorical(policy).sample()
+    def move(self, state):
+        action_probs, _ = self.forward(T.tensor([state]).float())
+        action = T.distributions.Categorical(action_probs).sample()
         return action.item()
+
+    def evaluate_actions(self, states, actions=None):
+        action_probs, state_values = self.forward(T.tensor(states).float())
+
+        if actions is None:
+            return state_values, None, None
+
+        dist = T.distributions.Categorical(action_probs)
+        log_probs = dist.log_prob(T.tensor(actions).long())
+        dist_entropy = dist.entropy()
+        return state_values, log_probs, dist_entropy
 # }}}
 
 # {{{ Agent
 
 
 class Agent(object):
-    def __init__(self, gamma, env_function, max_episodes=5000, total_cpu=4, shared_optim=True):
+    def __init__(self, gamma, env_function, max_episodes=5000, total_cpu=4, shared_optim=True,
+                 network_params=[128], lr=0.005):
         self.env_function = env_function
         self.gamma = gamma
 
         self.train_workers = total_cpu - 1
         self.num_episodes = max_episodes
 
-        self.network_params = [128]
+        self.network_params = network_params
+        self.lr = lr
         self.episode_count, self.result_queue = mp.Value('i', 0), mp.Queue()
 
         env = env_function()
         self.model = ActorCriticNetwork(env.observation_space.shape, [env.action_space.n], self.network_params)
-        self.optimizer = None
         self.model.share_memory()
-
-        if shared_optim:
-            self.optimizer = SharedAdam(self.model.parameters(), lr=0.009)
+        self.optimizer = SharedAdam(self.model.parameters(), lr=self.lr) if shared_optim else None
 
         self.trainers = [LocalTrainer(self.gamma, self.env_function, self.num_episodes,
                                       self.model, self.optimizer, self.network_params,
-                                      self.episode_count, self.result_queue, i)
+                                      self.episode_count, self.result_queue, i,
+                                      self.lr)
                          for i in range(self.train_workers)]
 
         self.tester = LocalTester(env, self.num_episodes, self.episode_count, self.result_queue, self.model)
 
     def run(self):
-        [trainer.start() for trainer in self.trainers]
         self.tester.start()
+        [trainer.start() for trainer in self.trainers]
 
         [trainer.join() for trainer in self.trainers]
-        self.tester.join()
+        self.tester.join(timeout=1.0)
 # }}}
 
 # {{{ LocalTester
@@ -159,10 +182,10 @@ class LocalTester(mp.Process):
                   f'{np.mean(self.steps[:-self.log_interval+1]):06.2f} : '
                   f'{np.mean(self.losses):06.4f}')
 
-        print(f'{self.name}: Training Complete with average({self.log_interval} episodes) '
+        print(f'Training Complete with average({self.log_interval} episodes) '
               f'rewards: {np.mean(self.rewards[:-self.log_interval]):06.2f} :: '
               f'steps: {np.mean(self.steps[:-self.log_interval]):06.2f} :: '
-              f'losses: {np.mean(self.losses): 06.4f}')
+              f'losses: {np.mean(self.losses):06.4f}')
 
     def get_train_losses(self):
         self.losses = []
@@ -183,7 +206,9 @@ class LocalTester(mp.Process):
 class LocalTrainer(mp.Process):
     def __init__(self, gamma, env_function, max_episodes,
                  model, optimizer, network_params,
-                 global_episodes, global_result_queue, name):
+                 global_episodes, global_result_queue, name,
+                 lr, n_steps=5, critic_coeff=0.05, entropy_coeff=0.001,
+                 max_grad_norm=0.5, gae_lambda=1.0, advantage_scaling=False):
         super(LocalTrainer, self).__init__()
 
         self.gamma = gamma
@@ -194,20 +219,23 @@ class LocalTrainer(mp.Process):
         self.global_result_queue = global_result_queue
         self.name = 'Trainer#' + str(name)
 
-        self.n_steps = 5
-        self.critic_coeff = 0.5
-        self.entropy_coeff = 0.001
-        self.max_grad_norm = 0.5
-        self.reward_scaling = True
+        self.n_steps = n_steps
+        self.critic_coeff = critic_coeff
+        self.entropy_coeff = entropy_coeff
+        self.max_grad_norm = max_grad_norm
+
+        self.lr = lr
+        self.gae_lambda = gae_lambda
+        self.advantage_scaling = advantage_scaling
 
         self.global_model = model
         self.optimizer = optimizer
         self.network_params = network_params
 
         if not self.optimizer:
-            self.optimizer = T.optim.Adam(self.global_model.parameters(), lr=0.005, weight_decay=0.005)
+            self.optimizer = T.optim.Adam(self.global_model.parameters(), lr=self.lr)
 
-        self.memory = TransitionBuffer(self.n_steps * 10)  # idk wadduh hek going on?
+        self.memory = TransitionBuffer(self.n_steps)
         self.local_model = ActorCriticNetwork(self.env.observation_space.shape,
                                               [self.env.action_space.n], self.network_params)
 
@@ -223,6 +251,7 @@ class LocalTrainer(mp.Process):
             state = self.env.reset()
             episode_reward = 0
             n_steps = 0
+            losses = []
 
             while not done:
                 for t in range(self.n_steps):
@@ -238,15 +267,17 @@ class LocalTrainer(mp.Process):
                     if done:
                         break
 
-            actor_loss, critic_loss, entropy_loss = self.calculate_loss()
-            loss = (actor_loss + critic_loss + entropy_loss).mean()
+                actor_loss, critic_loss, entropy_loss = self.calculate_loss()
+                loss = (actor_loss + critic_loss + entropy_loss).mean()
+
+                self.push_weights(loss)
+                losses.append(loss.item())
 
             # visualize
             # make_dot(loss, params=dict(self.local_model.named_parameters())).render("attached")
             # raise SystemError
 
-            self.push_weights(loss)
-            self.global_result_queue.put([episode_reward, n_steps, loss.item()])
+            self.global_result_queue.put([episode_reward, n_steps, np.mean(losses)])
 
             with self.global_episodes.get_lock():
                 self.global_episodes.value += 1
@@ -263,41 +294,32 @@ class LocalTrainer(mp.Process):
         self.optimizer.step()
         self.pull_weights()
 
-    def get_discounted_reward(self, states_, rewards, R):
-        state_values_ = T.squeeze(self.global_model(T.tensor(states_).float())[1].detach())
+    def calculate_advantages(self, states_, state_values, rewards, terminals):
+        with T.no_grad():
+            state_values = state_values.numpy().flatten()
+            state_values_ = self.local_model.evaluate_actions(states_)[0].numpy().flatten()
 
-        discounted_rewards = np.zeros_like(rewards)
-        for index, reward in enumerate(rewards[::-1]):
-            discounted_rewards[len(rewards) - index - 1] = R = reward + self.gamma * R
-        discounted_rewards = (self.gamma ** self.n_steps) * state_values_ + discounted_rewards
+        lambda_return, advantages = 0.0, np.zeros_like(rewards)
+        for index, (reward, terminal) in enumerate(zip(rewards[::-1], terminals[::-1])):
+            inverse_index = len(rewards) - index - 1
+            delta = reward + self.gamma * state_values_[inverse_index] * (1 - terminal) - state_values[inverse_index]
+            lambda_return = delta + self.gamma * self.gae_lambda * (1 - terminal) * lambda_return
+            advantages[inverse_index] = lambda_return
 
-        if self.reward_scaling:
-            discounted_rewards = ((discounted_rewards - discounted_rewards.mean()) / (discounted_rewards.std() + 1e-5))
+        rollout_rewards = advantages + state_values
 
-        return discounted_rewards
+        if self.advantage_scaling:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
 
-    def get_transition_values(self):
-        actions, states, states_, rewards, terminals = self.memory.get_all(clear=True)
-
-        states = T.tensor(states).float()
-        actions = T.tensor(actions).float()
-        action_probs, state_values = self.local_model(states)
-
-        discounted_rewards = self.get_discounted_reward(states_, rewards,
-                                                        0 if terminals[-1] else state_values[-1].item())
-
-        dist = T.distributions.Categorical(action_probs)
-        log_probs = dist.log_prob(actions)
-        dist_entropy = dist.entropy()
-
-        return discounted_rewards, state_values, log_probs, dist_entropy
+        return T.tensor(rollout_rewards).float(), T.tensor(advantages).float()
 
     def calculate_loss(self):
-        rewards, state_values, log_probs, dist_entropy = self.get_transition_values()
-        advantage = rewards - state_values
+        actions, states, states_, rewards, terminals = self.memory.get_all(clear=True)
+        state_values, log_probs, dist_entropy = self.local_model.evaluate_actions(states, actions)
+        rollout_rewards, advantages = self.calculate_advantages(states_, state_values, rewards, terminals)
 
-        actor_loss = - log_probs * advantage.detach()
-        critic_loss = self.critic_coeff * advantage ** 2
+        actor_loss = - log_probs * advantages
+        critic_loss = self.critic_coeff * (rollout_rewards - state_values.flatten()) ** 2
         entropy_loss = - self.entropy_coeff * dist_entropy
 
         return actor_loss, critic_loss, entropy_loss
@@ -309,5 +331,6 @@ def create_env():
 
 
 if __name__ == '__main__':
-    agent = Agent(0.9, create_env, max_episodes=3000, total_cpu=mp.cpu_count()-1, shared_optim=False)
+    agent = Agent(0.90, create_env, max_episodes=3000, total_cpu=mp.cpu_count() - 1,
+                  shared_optim=True, lr=0.0005)
     agent.run()
