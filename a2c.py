@@ -8,10 +8,6 @@ import gym
 from collections import deque
 
 
-T.manual_seed(0)
-np.random.seed(0)
-
-
 class TransitionMemory:
     def __init__(self, mem_size):
         self.mem_size = mem_size
@@ -29,11 +25,10 @@ class TransitionMemory:
 
 
 class ActorCriticNetwork(nn.Module):
-    def __init__(self, input_shape, output_shape, hidden_layer_dims, lr=0.001):
+    def __init__(self, input_shape, output_shape, hidden_layer_dims, lr):
         super(ActorCriticNetwork, self).__init__()
 
-        layers = []
-        layers.append(nn.Linear(*input_shape, hidden_layer_dims[0]))
+        layers = [nn.Linear(*input_shape, hidden_layer_dims[0])]
         for index, dim in enumerate(hidden_layer_dims[1:]):
             layers.append(nn.Linear(hidden_layer_dims[index], dim))
 
@@ -61,7 +56,7 @@ class ActorCriticNetwork(nn.Module):
         return action_probs, state_values
 
     def move(self, state):
-        action_probs, _ = self.forward(T.tensor(state).float())
+        action_probs, _ = self.forward(T.tensor([state]).float())
         action = T.distributions.Categorical(action_probs).sample()
         return action.item()
 
@@ -88,6 +83,7 @@ class Agent(object):
         self.critic_coeff = critic_coeff
         self.entropy_coeff = entropy_coeff
         self.max_grad_norm = max_grad_norm
+
         self.lr = lr
         self.gae_lambda = gae_lambda
         self.advantage_scaling = advantage_scaling
@@ -195,8 +191,8 @@ def learn(env, agent, episodes=500):
 if __name__ == '__main__':
     env = gym.make('CartPole-v0')
     # env = gym.make('LunarLander-v2')
-    agent = Agent(0.99, env.observation_space.shape, [env.action_space.n],
-                  n_steps=5, entropy_coeff=0.000, critic_coeff=0.5, lr=0.001,
+    agent = Agent(0.90, env.observation_space.shape, [env.action_space.n],
+                  n_steps=5, entropy_coeff=0.0001, critic_coeff=0.5, lr=0.0007,
                   gae_lambda=1.0, network_params=[64, 64])
 
     learn(env, agent, 1000)
