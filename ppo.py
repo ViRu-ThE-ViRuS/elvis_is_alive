@@ -151,6 +151,7 @@ class Agent(object):
 
         self.update()
         return losses
+# }}}
 
 
 def learn(env, agent, episodes=500):
@@ -179,7 +180,7 @@ def learn(env, agent, episodes=500):
 
             if timestep % agent.update_interval == 0:
                 loss = agent.learn()
-                losses.extend(loss)
+                losses.append(loss)
 
         rewards.append(total_reward)
         steps.append(n_steps)
@@ -194,7 +195,6 @@ def learn(env, agent, episodes=500):
     print(f'{episode:5d} : {np.mean(rewards):06.2f} '
           f': {np.mean(losses):06.4f} : {np.mean(steps):06.2f}')
     return losses, rewards
-# }}}
 
 
 if __name__ == '__main__':
