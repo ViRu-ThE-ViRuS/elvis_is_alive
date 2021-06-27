@@ -45,10 +45,10 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
+# TODO(vir): add batchnorm layers, for paper coherence
 class CriticNetwork(nn.Module):
-    def __init__(self, input_shape, output_shape, hidden_layer_dims, lr):
+    def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(CriticNetwork, self).__init__()
-        self.lr = lr
 
         layers = [nn.Linear(*input_shape, hidden_layer_dims[0])]
         for index, dim in enumerate(hidden_layer_dims[1:]):
@@ -62,7 +62,6 @@ class CriticNetwork(nn.Module):
             T.nn.init.uniform_(layer.bias.data, -_l, _l)
 
         self.layers = nn.ModuleList(layers)
-        self.optimizer = T.optim.Adam(self.parameters(), self.lr)
 
     def forward(self, states, actions):
         for layer in self.layers[:-2]:
@@ -73,10 +72,10 @@ class CriticNetwork(nn.Module):
         return state_values
 
 
+# TODO(vir): add batchnorm layers, for paper coherence
 class ActorNetwork(nn.Module):
-    def __init__(self, input_shape, output_shape, hidden_layer_dims, lr):
+    def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(ActorNetwork, self).__init__()
-        self.lr = lr
 
         layers = [nn.Linear(*input_shape, hidden_layer_dims[0])]
         for index, dim in enumerate(hidden_layer_dims[1:]):
@@ -89,7 +88,6 @@ class ActorNetwork(nn.Module):
             T.nn.init.uniform_(layer.bias.data, -_l, _l)
 
         self.layers = nn.ModuleList(layers)
-        self.optimizer = T.optim.Adam(self.parameters(), self.lr)
 
     def forward(self, states):
         for layer in self.layers[:-1]:
@@ -104,7 +102,7 @@ class Agent:
         self.lrs = lrs
         self.gamma = gamma
 
-        self.tau = 8
+        self.tau = 0.001
         self.batch_size = 32
         self.max_grad_norm = 0.5
         self.actor_network_params = [128, 128]
@@ -113,46 +111,45 @@ class Agent:
         self.memory = ReplayBuffer(10000)
         self.noise = OUActionNoise(np.zeros(self.env.action_space.shape))
 
-        self.actor = ActorNetwork(self.env.observation_space.shape, self.env.action_space.shape,
-                                  self.actor_network_params, self.lrs[0])
-        self.target_actor = ActorNetwork(self.env.observation_space.shape, self.env.action_space.shape,
-                                         self.actor_network_params, self.lrs[0])
+        self.actor = ActorNetwork(self.env.observation_space.shape,
+                                  self.env.action_space.shape,
+                                  self.actor_network_params)
+        self.target_actor = ActorNetwork(self.env.observation_space.shape,
+                                         self.env.action_space.shape,
+                                         self.actor_network_params)
 
-        self.critic = CriticNetwork(self.env.observation_space.shape, self.env.action_space.shape,
-                                    self.critic_network_params, self.lrs[1])
-        self.target_critic = CriticNetwork(self.env.observation_space.shape, self.env.action_space.shape,
-                                           self.critic_network_params, self.lrs[1])
+        self.critic = CriticNetwork(self.env.observation_space.shape,
+                                    self.env.action_space.shape,
+                                    self.critic_network_params)
+        self.target_critic = CriticNetwork(self.env.observation_space.shape,
+                                           self.env.action_space.shape,
+                                           self.critic_network_params)
 
-        self.learn_step = 0
+        self.actor_optimizer = T.optim.Adam(self.actor.parameters(), self.lrs[0])
+        self.critic_optimizer = T.optim.Adam(self.critic.parameters(), self.lrs[1])
+
         self.update()
 
     def update(self):
-        if self.learn_step % self.tau == 0:
-            actor_state_dict = dict(self.actor.named_parameters())
-            critic_state_dict = dict(self.critic.named_parameters())
-            target_critic_dict = dict(self.target_critic.named_parameters())
-            target_actor_dict = dict(self.target_actor.named_parameters())
+        for target_param, param in zip(self.target_actor.parameters(),
+                                       self.actor.parameters()):
+            target_param.data.copy_(target_param.data * (1.0 - self.tau)
+                                    + param.data * self.tau)
 
-            for name in actor_state_dict:
-                actor_state_dict[name] = self.tau * actor_state_dict[name].clone() + \
-                    (1 - self.tau) * target_actor_dict[name].clone()
+        for target_param, param in zip(self.target_critic.parameters(),
+                                       self.critic.parameters()):
+            target_param.data.copy_(target_param.data * (1.0 - self.tau)
+                                    + param.data * self.tau)
 
-            for name in critic_state_dict:
-                critic_state_dict[name] = self.tau * critic_state_dict[name].clone() + \
-                    (1 - self.tau) * target_critic_dict[name].clone()
-
-            self.target_actor.load_state_dict(target_actor_dict)
-            self.target_critic.load_state_dict(target_critic_dict)
-
-            self.target_actor.eval()
-            self.target_critic.eval()
-            self.critic.train()
+        self.target_actor.eval()
+        self.target_critic.eval()
+        self.critic.train()
+        self.actor.eval()
 
     def store(self, transition):
         self.memory.store(transition)
 
     def move(self, state):
-        self.actor.eval()
         mu = self.actor(T.tensor(state).float())
         mu_prime = mu + self.noise()
         return mu_prime.detach().numpy()
@@ -161,10 +158,10 @@ class Agent:
         (states, actions, states_, rewards, dones) = self.memory.sample(self.batch_size)
 
         states = T.tensor(states).float()
-        actions = T.tensor(actions).long()
+        actions = T.tensor(actions).float()
         states_ = T.tensor(states_).float()
         rewards = T.tensor(rewards).float()
-        dones = T.tensor(dones).float()
+        dones = T.tensor(dones).long()
 
         return states, actions, states_, rewards, dones
 
@@ -173,28 +170,31 @@ class Agent:
             return
 
         self.actor.train()
-        self.learn_step += 1
-        states, actions, states_, rewards, dones = self.sample()
+        states, actions, states_, rewards, terminals = self.sample()
 
-        target_actions_ = self.target_actor(states_)
-        state_values_ = T.squeeze(self.target_critic(states_, target_actions_), dim=-1)
-        state_values = T.squeeze(self.critic(states, actions), dim=-1)
+        with T.no_grad():
+            actions_ = self.target_actor(states_)
+            state_values_ = self.target_critic(states_, actions_).flatten()
 
-        rewards = rewards + self.gamma * state_values_ * (1 - dones)
-        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
-        critic_loss = F.mse_loss(input=state_values, target=rewards.detach())
+        state_values = self.critic(states, actions).flatten()
+        target_values = rewards + self.gamma * state_values_ * (1 - terminals)
+        target_values = (target_values - target_values.mean()) / (target_values.std() + 1e-5)
 
-        self.critic.optimizer.zero_grad()
+        critic_loss = F.mse_loss(input=state_values, target=target_values)
+
+        self.critic_optimizer.zero_grad()
         critic_loss.backward()
         T.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        self.critic.optimizer.step()
+        self.critic_optimizer.step()
 
+        # actor maximises the critic function to selection optimal action
+        # actor(x) = argmax_a critic(x, a)
         actor_loss = -self.critic(states, self.actor(states)).mean()
 
-        self.actor.optimizer.zero_grad()
+        self.actor_optimizer.zero_grad()
         actor_loss.backward()
         T.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-        self.actor.optimizer.step()
+        self.actor_optimizer.step()
 
         # visualize
         # make_dot(critic_loss, params=dict(self.critic.named_parameters())).render("attached")
@@ -247,5 +247,5 @@ def learn(agent, episodes=500):
 
 
 if __name__ == '__main__':
-    agent = Agent('LunarLanderContinuous-v2', 0.9, (0.0001, 0.0001))
+    agent = Agent('LunarLanderContinuous-v2', 0.99, (0.0001, 0.0001))
     learn(agent, 100)

@@ -26,23 +26,6 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-class ValueNetwork(nn.Module):
-    def __init__(self, input_shape, output_shape, hidden_layer_dims):
-        super(ValueNetwork, self).__init__()
-
-        layers = [nn.Linear(*input_shape, hidden_layer_dims[0])]
-        for index, dim in enumerate(hidden_layer_dims[1:]):
-            layers.append(nn.Linear(hidden_layer_dims[index], dim))
-        layers.append(nn.Linear(hidden_layer_dims[-1], 1))
-        self.layers = nn.ModuleList(layers)
-
-    def forward(self, states):
-        for layer in self.layers[:-1]:
-            states = F.relu(layer(states))
-        state_values = self.layers[-1](states)
-        return state_values
-
-
 class ActionValueNetwork(nn.Module):
     def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(ActionValueNetwork, self).__init__()
