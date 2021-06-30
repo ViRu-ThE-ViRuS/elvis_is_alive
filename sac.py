@@ -55,9 +55,9 @@ class ActionValueNetwork(nn.Module):
         return x1, x2
 
 
-class Policy(nn.Module):
+class GaussianPolicyNetwork(nn.Module):
     def __init__(self, input_shape, output_shape, hidden_layer_dims, action_space=None):
-        super(Policy, self).__init__()
+        super(GaussianPolicyNetwork, self).__init__()
 
         layers = [nn.Linear(*input_shape, hidden_layer_dims[0])]
         for index, dim in enumerate(hidden_layer_dims[1:]):
@@ -90,33 +90,81 @@ class Policy(nn.Module):
         std = log_std.exp()
         normal = T.distributions.Normal(mean, std)
 
-        x_t = normal.rsample()  # resample
-        y_t = T.tanh(x_t)
+        x_t = normal.rsample()  # reparam trick: grad wrt mean and std, sample eps from std normal
+        y_t = T.tanh(x_t)       # squash to bounded values
         action = y_t * self.action_scale + self.action_bias
 
         log_prob = normal.log_prob(x_t)
-        log_prob -= T.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
-        log_prob = log_prob.sum(1, keepdim=True)
+        log_prob -= T.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)  # scale log prob
+        log_prob = log_prob.sum(1, keepdim=True)  # log prob of each action-space value
 
         return action, log_prob, mean
 
 
+class DeterministicPolicyNetwork(nn.Module):
+    def __init__(self, input_shape, output_shape, hidden_layer_dims, action_space=None):
+        super(DeterministicPolicyNetwork, self).__init__()
+
+        layers = [nn.Linear(*input_shape, hidden_layer_dims[0])]
+        for index, dim in enumerate(hidden_layer_dims[1:]):
+            layers.append(nn.Linear(hidden_layer_dims[index], dim))
+
+        self.layers = nn.ModuleList(layers)
+        self.mean = nn.Linear(hidden_layer_dims[-1], *output_shape)
+        self.noise = T.tensor(*output_shape)
+
+        if action_space is None:
+            self.action_scale = 1.0
+            self.action_bias = 0.0
+        else:
+            self.action_scale = T.Tensor((action_space.high - action_space.low) / 2.0).float()
+            self.action_bias = T.Tensor((action_space.high + action_space.low) / 2.0).float()
+
+    def forward(self, states):
+        for layer in self.layers:
+            states = F.relu(layer(states))
+
+        mean = self.mean(states)
+        return T.tanh(mean) * self.action_scale + self.action_bias
+
+    def sample(self, states):
+        mean = self.forward(states)
+        noise = self.noise.normal_(0.0, std=0.1)
+        noise = noise.clamp(-0.25, 0.25)
+        action = mean + noise
+        return action, T.tensor(0.0), mean
+
+
 class Agent:
     def __init__(self, input_shape, output_shape, args):
-        self.alpha = args['alpha']
-        self.gamma = args['gamma']
-        self.tau = args['tau']
-        self.K = args['K']
-        self.lr = args['lr']
-        self.batch_size = args['batch_size']
+        self.alpha = args.get('alpha', 0.2)
+        self.gamma = args.get('gamma', 0.99)
+        self.tau = args.get('tau', 0.005)
+        self.K = args.get('K', 1)
+        self.lr = args.get('lr', 0.0001)
+        self.batch_size = args.get('batch_size', 256)
+        self.target_update_interval = args.get('target_update_interval', 1)
+        self.automatic_entropy_tuning = args.get('automatic_entropy_tuning', False)
+        self.critic_nn_shape = args.get('critic_nn_shape', [64])
+        self.actor_nn_shape = args.get('actor_nn_shape', [64])
 
-        self.target_update_interval = args['target_update_interval']
+        action_space = args.get('action_space', None)
 
-        self.policy = Policy(input_shape, output_shape, [64])
-        self.critic = ActionValueNetwork(input_shape, output_shape, [64, 64])
-        self.critic_ = ActionValueNetwork(input_shape, output_shape, [64, 64])
-
+        self.critic = ActionValueNetwork(input_shape, output_shape, self.critic_nn_shape)
+        self.critic_ = ActionValueNetwork(input_shape, output_shape, self.critic_nn_shape)
         self.update(soft=False)
+
+        if args.get('policy_type', 'gaussian') == 'gaussian':
+            if self.automatic_entropy_tuning:
+                self.target_entropy = -T.prod(T.tensor(action_space.shape)).item()
+                self.log_alpha = T.zeros(1, requires_grad=True)
+                self.alpha_optim = T.optim.Adam([self.log_alpha], lr=self.lr)
+
+            self.policy = GaussianPolicyNetwork(input_shape, output_shape, self.actor_nn_shape, action_space)
+        else:
+            self.alpha = 0
+            self.automatic_entropy_tuning = False
+            self.policy = DeterministicPolicyNetwork(input_shape, output_shape, self.actor_nn_shape, action_space)
 
         self.critic_optim = T.optim.Adam(self.critic.parameters(), lr=self.lr)
         self.policy_optim = T.optim.Adam(self.policy.parameters(), lr=self.lr)
@@ -186,6 +234,17 @@ class Agent:
         policy_loss.backward()
         self.policy_optim.step()
 
+        if self.automatic_entropy_tuning:
+            alpha_loss = -(self.log_alpha * (log_pi + self.target_entropy).detach()).mean()
+
+            self.alpha_optim.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optim.step()
+
+            self.alpha = self.log_alpha.exp()
+        else:
+            alpha_loss = T.tensor(0.0)
+
         if self.learn_step % self.target_update_interval == 0:
             self.update(soft=True)
 
@@ -193,7 +252,7 @@ class Agent:
         # make_dot(critic_loss, params=dict(self.critic.named_parameters())).render("attached")
         # raise SystemError
 
-        return (critic_loss + policy_loss).item()
+        return (critic_loss + policy_loss + alpha_loss).item()
 
 
 def learn(env, agent, args):
@@ -258,7 +317,10 @@ if __name__ == '__main__':
         'K': 1,
         'lr': 0.0001,
         'batch_size': 256,
-        'target_update_interval': 1
+        'target_update_interval': 1,
+        'automatic_entropy_tuning': False,
+        'action_space': None,
+        'policy': 'gaussian'
     }
     agent = Agent(env.observation_space.shape, [env.action_space.shape[0]], agent_args)
 
