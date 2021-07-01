@@ -8,25 +8,6 @@ import gym
 from collections import deque
 
 
-class OUActionNoise:
-    def __init__(self, mu, sigma=0.15, theta=0.2, dt=1e-2, x0=None):
-        self.mu = mu
-        self.sigma = sigma
-        self.theta = theta
-        self.dt = dt
-        self.x0 = x0
-
-        self.reset()
-
-    def reset(self):
-        self.x_prev = self.x0 if self.x0 else np.zeros_like(self.mu)
-
-    def __call__(self):
-        self.x_prev = x = self.x_prev + self.theta * (self.mu - self.x_prev) * self.dt \
-            + self.sigma * np.sqrt(self.dt) * np.random.normal(size=self.mu.shape)
-        return T.tensor(x)
-
-
 class ReplayBuffer:
     def __init__(self, mem_size):
         self.mem_size = mem_size
@@ -45,34 +26,41 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-# TODO(vir): add batchnorm layers, for paper coherence
 class CriticNetwork(nn.Module):
     def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(CriticNetwork, self).__init__()
 
-        layers = [nn.Linear(input_shape[0] + output_shape[0], hidden_layer_dims[0])]
+        q1_layers = [nn.Linear(input_shape[0] + output_shape[0], hidden_layer_dims[0])]
         for index, dim in enumerate(hidden_layer_dims[1:]):
-            layers.append(nn.Linear(hidden_layer_dims[index], dim))
-        layers.append(nn.Linear(hidden_layer_dims[-1], *output_shape))
-        layers.append(nn.Linear(*output_shape, 1))
+            q1_layers.append(nn.Linear(hidden_layer_dims[index], dim))
+        q1_layers.append(nn.Linear(hidden_layer_dims[-1], *output_shape))
 
-        for layer in layers:
-            _l = 1/np.sqrt(layer.weight.data.size()[0])
-            T.nn.init.uniform_(layer.weight.data, -_l, _l)
-            T.nn.init.uniform_(layer.bias.data, -_l, _l)
+        q2_layers = [nn.Linear(input_shape[0] + output_shape[0], hidden_layer_dims[0])]
+        for index, dim in enumerate(hidden_layer_dims[1:]):
+            q2_layers.append(nn.Linear(hidden_layer_dims[index], dim))
+        q2_layers.append(nn.Linear(hidden_layer_dims[-1], *output_shape))
 
-        self.layers = nn.ModuleList(layers)
+        self.q1_layers = nn.ModuleList(q1_layers)
+        self.q2_layers = nn.ModuleList(q2_layers)
+        self.q1 = nn.Linear(*output_shape, 1)
+        self.q2 = nn.Linear(*output_shape, 1)
 
     def forward(self, states, actions):
         x = T.cat([states, actions], dim=1)
-        for layer in self.layers[:-1]:
-            x = F.relu(layer(x))
-        state_values = self.layers[-1](x)
+        A, B = x.clone(), x.clone()
 
-        return state_values
+        for layer in self.q1_layers:
+            A = F.relu(layer(A))
+
+        for layer in self.q2_layers:
+            B = F.relu(layer(B))
+
+        q1 = self.q1(A)
+        q2 = self.q2(B)
+
+        return q1, q2
 
 
-# TODO(vir): add batchnorm layers, for paper coherence
 class ActorNetwork(nn.Module):
     def __init__(self, input_shape, output_shape, hidden_layer_dims):
         super(ActorNetwork, self).__init__()
@@ -102,17 +90,20 @@ class Agent:
         self.lrs = lrs
         self.gamma = gamma
 
-        self.tau = 0.001
-        self.batch_size = 64
+        self.tau = 0.005
+        self.batch_size = 128
         self.max_grad_norm = 0.5
         self.actor_network_params = [128, 128]
         self.critic_network_params = [128, 128]
+        self.d = 2
+        self.c = 0.5
+        self.learn_step = 0
 
         self.min_action = T.tensor(self.env.action_space.low)
         self.max_action = T.tensor(self.env.action_space.high)
 
         self.memory = ReplayBuffer(10000)
-        self.noise = OUActionNoise(np.zeros(self.env.action_space.shape))
+        self.noise = T.distributions.Normal(T.tensor(0.0), T.tensor(0.1))
 
         self.actor = ActorNetwork(self.env.observation_space.shape,
                                   self.env.action_space.shape,
@@ -159,7 +150,7 @@ class Agent:
 
     def move(self, state):
         mu = self.actor(T.tensor(state).float())
-        mu_prime = T.max(T.min(mu + self.noise(), self.max_action), self.min_action)
+        mu_prime = T.max(T.min(mu + self.noise.sample(), self.max_action), self.min_action)
         return mu_prime.detach().numpy()
 
     def sample(self):
@@ -168,8 +159,8 @@ class Agent:
         states = T.tensor(states).float()
         actions = T.tensor(actions).float()
         states_ = T.tensor(states_).float()
-        rewards = T.tensor(rewards).float()
-        dones = T.tensor(dones).long()
+        rewards = T.tensor(rewards).float().view(-1, 1)
+        dones = T.tensor(dones).long().view(-1, 1)
 
         return states, actions, states_, rewards, dones
 
@@ -177,37 +168,41 @@ class Agent:
         if len(self.memory) < self.batch_size:
             return
 
+        self.learn_step += 1
         self.actor.train()
         states, actions, states_, rewards, terminals = self.sample()
 
+        q1_state_values, q2_state_values = self.critic(states, actions)
+
         with T.no_grad():
-            actions_ = self.target_actor(states_)
-            state_values_ = self.target_critic(states_, actions_).flatten()
+            noise = T.clip(self.noise.sample(actions.shape), -self.c, self.c)
+            actions_ = T.max(T.min(self.target_actor(states_) + noise, self.max_action), self.min_action)
+            state_values_ = T.min(*self.target_critic(states_, actions_))
             target_values = rewards + self.gamma * state_values_ * (1 - terminals)
             target_values = (target_values - target_values.mean()) / (target_values.std() + 1e-5)
 
-        state_values = self.critic(states, actions).flatten()
-        critic_loss = F.mse_loss(input=state_values, target=target_values)
+        critic_loss = F.mse_loss(q1_state_values, target_values) + F.mse_loss(q2_state_values, target_values)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         T.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.critic_optimizer.step()
 
-        # actor maximises the critic function to selection optimal action
-        # actor(x) = argmax_a critic(x, a)
-        actor_loss = -self.critic(states, self.actor(states)).mean()
+        actor_loss = T.tensor([0])
+        if self.learn_step % self.d == 0:
+            actor_loss = -T.max(*self.critic(states, self.actor(states))).mean()
 
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        T.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-        self.actor_optimizer.step()
+            self.actor_optimizer.zero_grad()
+            actor_loss.backward()
+            T.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            self.actor_optimizer.step()
 
-        # visualize
-        # make_dot(actor_loss, params=dict(self.actor.named_parameters())).render("attached")
-        # raise SystemError
+            self.update()
 
-        self.update()
+            # visualize
+            # make_dot(actor_loss, params=dict(self.actor.named_parameters())).render("attached")
+            # raise SystemError
+
         return (actor_loss + critic_loss).item()
 
 
@@ -254,5 +249,5 @@ def learn(agent, episodes=500):
 
 
 if __name__ == '__main__':
-    agent = Agent('LunarLanderContinuous-v2', 0.99, (0.0001, 0.0001))
+    agent = Agent('LunarLanderContinuous-v2', 0.99, (0.001, 0.001))
     learn(agent, 100)
