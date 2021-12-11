@@ -128,9 +128,11 @@ class Agent:
         rewards = rewards.expand_as(next_dist)
         terminals = terminals.expand_as(next_dist)
 
+        # shrink + shift distribution -> normalize values
         Tz = (rewards + self.gamma * support * (1 - terminals)).clamp(min=self.V_MIN, max=self.V_MAX)
         b = ((Tz - self.V_MIN) / delta_z)
 
+        # lower and upper buckets, vectorize
         l = b.floor().long()
         u = b.ceil().long()
         offset = T.linspace(0, (self.batch_size - 1) * self.n_atoms, self.batch_size).long()\
